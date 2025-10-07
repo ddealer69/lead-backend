@@ -386,6 +386,46 @@ class LeadsManager:
                 'leads': []
             }
     
+    # ===================== HELPER METHODS =====================
+    
+    def get_profile_url_from_search_result(self, lead_id: str) -> Dict[str, Any]:
+        """
+        Get LinkedIn profile URL from google_search_results table using lead_id
+        Returns: {'success': bool, 'message': str, 'profile_url': str or None}
+        """
+        try:
+            search_result = self.supabase.table('google_search_results').select('link, title').eq('id', lead_id).execute()
+            
+            if not search_result.data:
+                return {
+                    'success': False,
+                    'message': 'No search result found for this lead ID',
+                    'profile_url': None
+                }
+            
+            profile_url = search_result.data[0]['link']
+            
+            # Validate it's a LinkedIn URL
+            if 'linkedin.com' not in profile_url.lower():
+                return {
+                    'success': False,
+                    'message': 'Search result does not contain a LinkedIn profile URL',
+                    'profile_url': None
+                }
+            
+            return {
+                'success': True,
+                'message': 'Profile URL retrieved successfully',
+                'profile_url': profile_url
+            }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error retrieving profile URL: {str(e)}',
+                'profile_url': None
+            }
+    
     # ===================== APIFY INTEGRATION =====================
     
     def start_apify_enrichment(self, profile_urls: List[str]) -> Dict[str, Any]:
@@ -511,6 +551,7 @@ class LeadsManager:
     def enrich_lead(self, lead_id: str) -> Dict[str, Any]:
         """
         Enrich a single lead using Apify
+        Gets LinkedIn URL from google_search_results table based on lead_id
         Returns: {'success': bool, 'message': str, 'lead': dict or None}
         """
         try:
@@ -533,13 +574,25 @@ class LeadsManager:
                     'lead': lead
                 }
             
+            # Get LinkedIn URL from google_search_results table using lead_id
+            url_result = self.get_profile_url_from_search_result(lead_id)
+            
+            if not url_result['success']:
+                return {
+                    'success': False,
+                    'message': url_result['message'],
+                    'lead': lead
+                }
+            
+            profile_url = url_result['profile_url']
+            
             # Update status to running
             self.update_lead(lead_id, {
                 'enrichment_status': 'running'
             })
             
-            # Start Apify enrichment
-            apify_result = self.start_apify_enrichment([lead['profile_url']])
+            # Start Apify enrichment with URL from google_search_results
+            apify_result = self.start_apify_enrichment([profile_url])
             
             if not apify_result['success']:
                 self.update_lead(lead_id, {
@@ -667,6 +720,7 @@ class LeadsManager:
     def bulk_enrich_leads(self, lead_ids: List[str]) -> Dict[str, Any]:
         """
         Enrich multiple leads in batch using Apify
+        Gets LinkedIn URLs from google_search_results table based on lead_ids
         Returns: {'success': bool, 'message': str, 'results': list}
         """
         try:
@@ -677,7 +731,7 @@ class LeadsManager:
                     'results': []
                 }
             
-            # Get all leads and validate
+            # Get all leads and their corresponding search results
             leads = []
             profile_urls = []
             
@@ -686,13 +740,18 @@ class LeadsManager:
                 if lead_result['success']:
                     lead = lead_result['lead']
                     if not lead['is_enriched']:
-                        leads.append(lead)
-                        profile_urls.append(lead['profile_url'])
+                        # Get LinkedIn URL from google_search_results table
+                        url_result = self.get_profile_url_from_search_result(lead_id)
                         
-                        # Update status to running
-                        self.update_lead(lead_id, {
-                            'enrichment_status': 'running'
-                        })
+                        if url_result['success']:
+                            profile_url = url_result['profile_url']
+                            leads.append(lead)
+                            profile_urls.append(profile_url)
+                            
+                            # Update status to running
+                            self.update_lead(lead_id, {
+                                'enrichment_status': 'running'
+                            })
             
             if not leads:
                 return {
@@ -745,10 +804,13 @@ class LeadsManager:
                             processed_leads = []
                             
                             # Match results to leads by profile URL
-                            for lead in leads:
+                            # Note: profile_urls array matches leads array by index
+                            for i, lead in enumerate(leads):
                                 matching_result = None
+                                lead_profile_url = profile_urls[i]  # Get corresponding URL
+                                
                                 for result in enrichment_results:
-                                    if result.get('url') == lead['profile_url']:
+                                    if result.get('url') == lead_profile_url:
                                         matching_result = result
                                         break
                                 
@@ -859,32 +921,34 @@ class LeadsManager:
                                        company_id: str, created_by: str) -> Dict[str, Any]:
         """
         Create leads from Google search results (LinkedIn profiles)
+        Uses google_search_results.id as the lead_id for direct mapping
         Returns: {'success': bool, 'message': str, 'leads_created': int, 'leads': list}
         """
         try:
-            # Import SearchManager to get search results
-            from search_utils import SearchManager
-            search_manager = SearchManager()
+            # Get search results directly from google_search_results table
+            search_results = self.supabase.table('google_search_results').select('*').eq('query_id', query_id).execute()
             
-            # Get search results
-            results_response = search_manager.get_search_results_by_query(query_id)
-            
-            if not results_response['success']:
+            if not search_results.data:
                 return {
                     'success': False,
-                    'message': f"Failed to get search results: {results_response['message']}",
+                    'message': 'No search results found for this query',
                     'leads_created': 0,
                     'leads': []
                 }
             
-            search_results = results_response['results']
             created_leads = []
             leads_created = 0
             
-            for result in search_results:
+            for result in search_results.data:
                 # Check if URL is a LinkedIn profile
                 url = result.get('link', '')
                 if 'linkedin.com/in/' in url.lower():
+                    # Check if lead already exists for this search result
+                    existing_lead = self.supabase.table('leads').select('id').eq('id', result['id']).execute()
+                    
+                    if existing_lead.data:
+                        continue  # Skip if lead already exists
+                    
                     # Extract basic info from search result
                     title = result.get('title', '')
                     snippet = result.get('snippet', '')
@@ -913,23 +977,35 @@ class LeadsManager:
                         else:
                             job_title = title_company_part
                     
-                    # Create lead
-                    lead_result = self.create_lead(
-                        account_id=account_id,
-                        company_id=company_id,
-                        created_by=created_by,
-                        profile_url=url,
-                        source_query_id=query_id,
-                        first_name=first_name,
-                        last_name=last_name,
-                        title=job_title,
-                        company_name=company_name,
-                        notes=f"Created from search result: {snippet[:200]}"
-                    )
+                    # Create lead with google_search_results.id as the lead.id
+                    lead_data = {
+                        'id': result['id'],  # Use search result ID as lead ID
+                        'account_id': account_id,
+                        'company_id': company_id,
+                        'source_query_id': query_id,
+                        'created_by': created_by,
+                        'profile_url': url,
+                        'first_name': first_name,
+                        'last_name': last_name,
+                        'title': job_title,
+                        'company_name': company_name,
+                        'location': None,
+                        'notes': f"Created from search result: {snippet[:200] if snippet else 'No snippet available'}",
+                        'enrichment_status': 'pending',
+                        'is_enriched': False
+                    }
                     
-                    if lead_result['success']:
-                        created_leads.append(lead_result['lead'])
-                        leads_created += 1
+                    try:
+                        # Insert lead with specific ID
+                        insert_result = self.supabase.table('leads').insert(lead_data).execute()
+                        
+                        if insert_result.data:
+                            created_leads.append(insert_result.data[0])
+                            leads_created += 1
+                            
+                    except Exception as insert_error:
+                        # Handle potential duplicate or other insertion errors
+                        continue
             
             return {
                 'success': True,
