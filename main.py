@@ -1,16 +1,6 @@
 """
-Flask Authenticat# Initialize managers  
-user_manager = DatabaseManager()
-company_manager = CompanyManager() 
-smtp_manager = SMTPManager()
-
-# Legacy variable names for existing frontend compatibility
-db = user_manager
-company_mgr = company_manager
-smtp_mgr = smtp_manager
-
-# Initialize social manager (will be added after social endpoints)
-social_manager = Noneovides endpoints for user authentication, registration, and account management
+Flask Authentication API
+Provides endpoints for user authentication, registration, and account management
 """
 
 import os
@@ -19,6 +9,7 @@ from flask_cors import CORS
 from db_utils import DatabaseManager
 from company_utils import CompanyManager
 from smtp_utils import SMTPManager
+from social_utils import SocialManager
 import logging
 
 # Configure logging
@@ -33,6 +24,7 @@ CORS(app)  # Enable CORS for all routes
 user_manager = DatabaseManager()
 company_manager = CompanyManager()
 smtp_manager = SMTPManager()
+social_manager = SocialManager()
 
 # Legacy variable names for existing frontend compatibility
 db = user_manager
@@ -859,6 +851,161 @@ def get_verified_smtp_credentials(account_id):
             'success': False,
             'message': 'Internal server error'
         }), 500
+
+# ============================================================================
+# SOCIAL MEDIA CONTENT GENERATION ROUTES
+# ============================================================================
+
+@app.route('/social-generate', methods=['POST'])
+def generate_social_content():
+    """
+    Generate social media content using AI.
+    
+    Required fields: account_id, company_id, platform, query
+    Optional fields: company_banner_id, requested_by, include_past
+    """
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        required_fields = ['account_id', 'company_id', 'platform', 'query']
+        missing_fields = [field for field in required_fields if not data.get(field)]
+        
+        if missing_fields:
+            return jsonify({
+                'success': False,
+                'message': f'Missing required fields: {", ".join(missing_fields)}',
+                'generation': None
+            }), 400
+        
+        # Generate content
+        result = social_manager.generate_social_content(
+            account_id=data['account_id'],
+            company_id=data['company_id'],
+            platform=data['platform'],
+            query=data['query'],
+            company_banner_id=data.get('company_banner_id'),
+            requested_by=data.get('requested_by'),
+            include_past=data.get('include_past', False)
+        )
+        
+        status_code = 201 if result['success'] else 400
+        return jsonify(result), status_code
+        
+    except Exception as e:
+        logger.error(f"Social content generation error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Server error: {str(e)}',
+            'generation': None
+        }), 500
+
+@app.route('/social-generations/<generation_id>', methods=['GET'])
+def get_social_generation(generation_id):
+    """Get a specific social media generation by ID."""
+    try:
+        result = social_manager.get_generation_by_id(generation_id)
+        status_code = 200 if result['success'] else 404
+        return jsonify(result), status_code
+        
+    except Exception as e:
+        logger.error(f"Get social generation error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Server error: {str(e)}',
+            'generation': None
+        }), 500
+
+@app.route('/accounts/<account_id>/social-generations', methods=['GET'])
+def get_social_generations_by_account(account_id):
+    """Get all social media generations for an account."""
+    try:
+        # Check for platform filter
+        platform = request.args.get('platform')
+        
+        if platform:
+            result = social_manager.get_generations_by_platform(account_id, platform)
+        else:
+            result = social_manager.get_generations_by_account(account_id)
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Get social generations by account error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Server error: {str(e)}',
+            'generations': []
+        }), 500
+
+@app.route('/companies/<company_id>/social-generations', methods=['GET'])
+def get_social_generations_by_company(company_id):
+    """Get all social media generations for a company."""
+    try:
+        result = social_manager.get_generations_by_company(company_id)
+        return jsonify(result), 200
+        
+    except Exception as e:
+        logger.error(f"Get social generations by company error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Server error: {str(e)}',
+            'generations': []
+        }), 500
+
+@app.route('/social-generations/<generation_id>', methods=['DELETE'])
+def delete_social_generation(generation_id):
+    """Delete a social media generation."""
+    try:
+        result = social_manager.delete_generation(generation_id)
+        status_code = 200 if result['success'] else 404
+        return jsonify(result), status_code
+        
+    except Exception as e:
+        logger.error(f"Delete social generation error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Server error: {str(e)}'
+        }), 500
+
+@app.route('/social-platforms', methods=['GET'])
+def get_supported_platforms():
+    """Get list of supported social media platforms."""
+    return jsonify({
+        'success': True,
+        'message': 'Supported social media platforms',
+        'platforms': [
+            {
+                'id': 'linkedin',
+                'name': 'LinkedIn',
+                'description': 'Professional networking and business content'
+            },
+            {
+                'id': 'instagram', 
+                'name': 'Instagram',
+                'description': 'Visual storytelling and brand narrative'
+            },
+            {
+                'id': 'youtube',
+                'name': 'YouTube', 
+                'description': 'Video content and tutorials'
+            },
+            {
+                'id': 'facebook',
+                'name': 'Facebook',
+                'description': 'Community engagement and social interaction'
+            },
+            {
+                'id': 'blog',
+                'name': 'Blog Posts',
+                'description': 'Long-form content and thought leadership'
+            }
+        ]
+    }), 200
+
+# ============================================================================
+# ERROR HANDLERS
+# ============================================================================
 
 @app.errorhandler(404)
 def not_found(error):
