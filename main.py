@@ -10,6 +10,8 @@ from db_utils import DatabaseManager
 from company_utils import CompanyManager
 from smtp_utils import SMTPManager
 from social_utils import SocialManager
+from search_utils import SearchManager
+from leads_utils import LeadsManager
 import logging
 
 # Configure logging
@@ -25,6 +27,8 @@ user_manager = DatabaseManager()
 company_manager = CompanyManager()
 smtp_manager = SMTPManager()
 social_manager = SocialManager()
+search_manager = SearchManager()
+leads_manager = LeadsManager()
 
 # Legacy variable names for existing frontend compatibility
 db = user_manager
@@ -1002,6 +1006,563 @@ def get_supported_platforms():
             }
         ]
     }), 200
+
+# ============================================================================
+# SEARCH QUERY MANAGEMENT ROUTES
+# ============================================================================
+
+@app.route('/api/search/queries', methods=['POST'])
+def create_search_query():
+    """
+    Create new search query endpoint
+    Expected JSON: {
+        "account_id": "uuid",
+        "company_id": "uuid",
+        "created_by": "uuid",
+        "query_string": "site:linkedin.com/in/ software engineer",
+        "name": "Software Engineers Search",          // optional
+        "company_banner_id": "uuid",                  // optional
+        "pages_requested": 5,                         // optional, default 1
+        "dedupe_mode": "per_company",                 // optional, default per_company
+        "notes": "Search for senior engineers"       // optional
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No JSON data provided'
+            }), 400
+        
+        # Extract required fields
+        account_id = data.get('account_id', '').strip()
+        company_id = data.get('company_id', '').strip()
+        created_by = data.get('created_by', '').strip()
+        query_string = data.get('query_string', '').strip()
+        
+        # Extract optional fields
+        name = data.get('name', '').strip() if data.get('name') else None
+        company_banner_id = data.get('company_banner_id', '').strip() if data.get('company_banner_id') else None
+        pages_requested = data.get('pages_requested', 1)
+        dedupe_mode = data.get('dedupe_mode', 'per_company')
+        notes = data.get('notes', '').strip() if data.get('notes') else None
+        
+        # Validation
+        if not all([account_id, company_id, created_by, query_string]):
+            return jsonify({
+                'success': False,
+                'message': 'account_id, company_id, created_by, and query_string are required'
+            }), 400
+        
+        result = search_manager.create_query(
+            account_id=account_id,
+            company_id=company_id,
+            created_by=created_by,
+            query_string=query_string,
+            name=name,
+            company_banner_id=company_banner_id,
+            pages_requested=pages_requested,
+            dedupe_mode=dedupe_mode,
+            notes=notes
+        )
+        
+        if result['success']:
+            logger.info(f"Search query created: {query_string} for account: {account_id}")
+            return jsonify(result), 201
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Create search query error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/search/queries/<query_id>', methods=['GET'])
+def get_search_query(query_id):
+    """Get search query by ID"""
+    try:
+        result = search_manager.get_query(query_id)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Get search query error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/search/queries/<query_id>', methods=['PUT'])
+def update_search_query(query_id):
+    """
+    Update search query endpoint
+    Expected JSON: {
+        "name": "Updated Search Name",     // optional
+        "query_string": "new query",      // optional
+        "pages_requested": 10,            // optional
+        "status": "paused",               // optional
+        "notes": "Updated notes"          // optional
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No JSON data provided'
+            }), 400
+        
+        result = search_manager.update_query(query_id, data)
+        
+        if result['success']:
+            logger.info(f"Search query updated: {query_id}")
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Update search query error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/search/queries/<query_id>', methods=['DELETE'])
+def delete_search_query(query_id):
+    """Delete search query and all associated results"""
+    try:
+        result = search_manager.delete_query(query_id)
+        
+        if result['success']:
+            logger.info(f"Search query deleted: {query_id}")
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Delete search query error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/search/accounts/<account_id>/queries', methods=['GET'])
+def get_search_queries_by_account(account_id):
+    """Get all search queries for an account"""
+    try:
+        result = search_manager.get_queries_by_account(account_id)
+        return jsonify(result), 200
+            
+    except Exception as e:
+        logger.error(f"Get search queries by account error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/search/companies/<company_id>/queries', methods=['GET'])
+def get_search_queries_by_company(company_id):
+    """Get all search queries for a company"""
+    try:
+        result = search_manager.get_queries_by_company(company_id)
+        return jsonify(result), 200
+            
+    except Exception as e:
+        logger.error(f"Get search queries by company error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/search/queries/<query_id>/process', methods=['POST'])
+def process_search_query(query_id):
+    """Process search query by executing Google searches for all requested pages"""
+    try:
+        result = search_manager.process_query(query_id)
+        
+        if result['success']:
+            logger.info(f"Search query processed: {query_id}")
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Process search query error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/search/queries/<query_id>/results', methods=['GET'])
+def get_search_results(query_id):
+    """Get all search results for a query"""
+    try:
+        processed_only = request.args.get('processed_only', 'false').lower() == 'true'
+        result = search_manager.get_search_results_by_query(query_id, processed_only)
+        
+        return jsonify(result), 200
+            
+    except Exception as e:
+        logger.error(f"Get search results error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/search/queries/<query_id>/results', methods=['DELETE'])
+def delete_search_results(query_id):
+    """Delete all search results for a query"""
+    try:
+        result = search_manager.delete_search_results_by_query(query_id)
+        
+        if result['success']:
+            logger.info(f"Search results deleted for query: {query_id}")
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Delete search results error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/search/queries/<query_id>/results/mark-processed', methods=['POST'])
+def mark_search_results_processed(query_id):
+    """Mark all search results for a query as processed"""
+    try:
+        result = search_manager.mark_results_processed(query_id)
+        
+        if result['success']:
+            logger.info(f"Search results marked as processed for query: {query_id}")
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Mark search results processed error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+# ============================================================================
+# LEADS MANAGEMENT ROUTES
+# ============================================================================
+
+@app.route('/api/leads', methods=['POST'])
+def create_lead():
+    """
+    Create new lead endpoint
+    Expected JSON: {
+        "account_id": "uuid",
+        "company_id": "uuid",
+        "created_by": "uuid",
+        "profile_url": "https://linkedin.com/in/johndoe",
+        "source_query_id": "uuid",                    // optional
+        "first_name": "John",                         // optional
+        "last_name": "Doe",                           // optional
+        "title": "Software Engineer",                 // optional
+        "company_name": "Tech Corp",                  // optional
+        "location": "San Francisco, CA",              // optional
+        "notes": "Potential candidate"                // optional
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No JSON data provided'
+            }), 400
+        
+        # Extract required fields
+        account_id = data.get('account_id', '').strip()
+        company_id = data.get('company_id', '').strip()
+        created_by = data.get('created_by', '').strip()
+        profile_url = data.get('profile_url', '').strip()
+        
+        # Extract optional fields
+        source_query_id = data.get('source_query_id', '').strip() if data.get('source_query_id') else None
+        first_name = data.get('first_name', '').strip() if data.get('first_name') else None
+        last_name = data.get('last_name', '').strip() if data.get('last_name') else None
+        title = data.get('title', '').strip() if data.get('title') else None
+        company_name = data.get('company_name', '').strip() if data.get('company_name') else None
+        location = data.get('location', '').strip() if data.get('location') else None
+        notes = data.get('notes', '').strip() if data.get('notes') else None
+        
+        # Validation
+        if not all([account_id, company_id, created_by, profile_url]):
+            return jsonify({
+                'success': False,
+                'message': 'account_id, company_id, created_by, and profile_url are required'
+            }), 400
+        
+        result = leads_manager.create_lead(
+            account_id=account_id,
+            company_id=company_id,
+            created_by=created_by,
+            profile_url=profile_url,
+            source_query_id=source_query_id,
+            first_name=first_name,
+            last_name=last_name,
+            title=title,
+            company_name=company_name,
+            location=location,
+            notes=notes
+        )
+        
+        if result['success']:
+            logger.info(f"Lead created: {profile_url} for account: {account_id}")
+            return jsonify(result), 201
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Create lead error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/leads/<lead_id>', methods=['GET'])
+def get_lead(lead_id):
+    """Get lead by ID"""
+    try:
+        result = leads_manager.get_lead(lead_id)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Get lead error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/leads/<lead_id>', methods=['PUT'])
+def update_lead(lead_id):
+    """
+    Update lead endpoint
+    Expected JSON: {
+        "first_name": "John",                // optional
+        "last_name": "Doe",                  // optional
+        "title": "Senior Software Engineer", // optional
+        "company_name": "New Corp",          // optional
+        "location": "New York, NY",          // optional
+        "notes": "Updated notes"             // optional
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No JSON data provided'
+            }), 400
+        
+        result = leads_manager.update_lead(lead_id, data)
+        
+        if result['success']:
+            logger.info(f"Lead updated: {lead_id}")
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Update lead error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/leads/<lead_id>', methods=['DELETE'])
+def delete_lead(lead_id):
+    """Delete lead"""
+    try:
+        result = leads_manager.delete_lead(lead_id)
+        
+        if result['success']:
+            logger.info(f"Lead deleted: {lead_id}")
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Delete lead error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/leads/accounts/<account_id>', methods=['GET'])
+def get_leads_by_account(account_id):
+    """Get all leads for an account"""
+    try:
+        enriched_only = request.args.get('enriched_only', 'false').lower() == 'true'
+        result = leads_manager.get_leads_by_account(account_id, enriched_only)
+        
+        return jsonify(result), 200
+            
+    except Exception as e:
+        logger.error(f"Get leads by account error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/leads/companies/<company_id>', methods=['GET'])
+def get_leads_by_company(company_id):
+    """Get all leads for a company"""
+    try:
+        enriched_only = request.args.get('enriched_only', 'false').lower() == 'true'
+        result = leads_manager.get_leads_by_company(company_id, enriched_only)
+        
+        return jsonify(result), 200
+            
+    except Exception as e:
+        logger.error(f"Get leads by company error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/leads/queries/<query_id>', methods=['GET'])
+def get_leads_by_query(query_id):
+    """Get all leads created from a specific search query"""
+    try:
+        result = leads_manager.get_leads_by_query(query_id)
+        
+        return jsonify(result), 200
+            
+    except Exception as e:
+        logger.error(f"Get leads by query error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/leads/<lead_id>/enrich', methods=['POST'])
+def enrich_lead(lead_id):
+    """Enrich a single lead using Apify LinkedIn scraper"""
+    try:
+        result = leads_manager.enrich_lead(lead_id)
+        
+        if result['success']:
+            logger.info(f"Lead enriched: {lead_id}")
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Enrich lead error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/leads/bulk-enrich', methods=['POST'])
+def bulk_enrich_leads():
+    """
+    Enrich multiple leads in batch using Apify
+    Expected JSON: {
+        "lead_ids": ["uuid1", "uuid2", "uuid3"]
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No JSON data provided'
+            }), 400
+        
+        lead_ids = data.get('lead_ids', [])
+        
+        if not lead_ids or not isinstance(lead_ids, list):
+            return jsonify({
+                'success': False,
+                'message': 'lead_ids must be a non-empty array'
+            }), 400
+        
+        result = leads_manager.bulk_enrich_leads(lead_ids)
+        
+        if result['success']:
+            logger.info(f"Bulk enrichment completed for {len(lead_ids)} leads")
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Bulk enrich leads error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/leads/from-search/<query_id>', methods=['POST'])
+def create_leads_from_search(query_id):
+    """
+    Create leads from Google search results containing LinkedIn profiles
+    Expected JSON: {
+        "account_id": "uuid",
+        "company_id": "uuid",
+        "created_by": "uuid"
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No JSON data provided'
+            }), 400
+        
+        account_id = data.get('account_id', '').strip()
+        company_id = data.get('company_id', '').strip()
+        created_by = data.get('created_by', '').strip()
+        
+        if not all([account_id, company_id, created_by]):
+            return jsonify({
+                'success': False,
+                'message': 'account_id, company_id, and created_by are required'
+            }), 400
+        
+        result = leads_manager.create_leads_from_search_results(
+            query_id=query_id,
+            account_id=account_id,
+            company_id=company_id,
+            created_by=created_by
+        )
+        
+        if result['success']:
+            logger.info(f"Created {result['leads_created']} leads from search query: {query_id}")
+            return jsonify(result), 201
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Create leads from search error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
 
 # ============================================================================
 # ERROR HANDLERS
