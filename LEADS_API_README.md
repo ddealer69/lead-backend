@@ -4,12 +4,12 @@ This API provides comprehensive LinkedIn lead management with profile enrichment
 
 ## Features
 
-- Create and manage LinkedIn leads
-- Automatic profile enrichment using Apify
-- Batch processing capabilities
+- Create and manage LinkedIn leads from Google search results
+- Automatic profile enrichment using Apify LinkedIn scraper
+- Batch processing capabilities for multiple leads
 - Integration with search query results
-- Status tracking and progress monitoring
-- Rich profile data extraction
+- Real-time enrichment with comprehensive profile data
+- Support for custom lead IDs and metadata
 
 ## Environment Variables Required
 
@@ -22,7 +22,19 @@ APIFY_API_TOKEN=your_apify_api_token
 ## Database Tables
 
 ### leads
-Stores lead information and enrichment status.
+Stores lead information and enrichment status with the following key fields:
+- `id`: Lead UUID (auto-generated if not provided)
+- `account_id`: Associated account UUID
+- `company_id`: Associated company UUID
+- `company_banner_id`: Optional company banner reference
+- `source_query_id`: Optional search query reference
+- `google_result_id`: Google search result reference
+- `source_link`: LinkedIn profile URL
+- `full_name`: Contact's full name
+- `title`: Job title/headline
+- `company_name`: Current company
+- `enrichment_status`: pending | in_progress | enriched | failed
+- `enrichment_payload`: Full JSON response from Apify
 
 ## API Endpoints
 
@@ -109,66 +121,192 @@ GET /api/leads/queries/{query_id}
 ### Lead Enrichment
 
 #### Enrich Single Lead
-Enriches a lead's profile using Apify LinkedIn scraper.
+Enriches a lead's profile using Apify LinkedIn scraper. Uses `google_result_id` to fetch LinkedIn URL from Google search results.
 
 ```http
-POST /api/leads/{lead_id}/enrich
+POST /api/leads/{any_lead_id}/enrich
+Content-Type: application/json
+
+{
+    "account_id": "uuid",
+    "company_id": "uuid", 
+    "created_by": "uuid",
+    "company_banner_id": "uuid",     // Optional
+    "source_query_id": "uuid",       // Optional
+    "google_result_id": "uuid"       // Required - ID from google_search_results table
+}
 ```
 
-**Response:**
+**Example Request:**
+```bash
+curl -X POST http://localhost:3000/api/leads/new-lead-123/enrich \
+  -H "Content-Type: application/json" \
+  -d '{
+    "account_id": "0cba4319-1bac-4399-a616-caf4367790fd",
+    "company_id": "9302e04a-d558-4e9c-b4ae-548c8146082a",
+    "created_by": "406f34af-9d1e-44d2-82c3-d910afe7fb5b",
+    "company_banner_id": "d70b795e-7041-495d-bc4c-2408bfdb7b48",
+    "source_query_id": "26b49b5a-4036-43f4-85a7-fdace10e3b0f",
+    "google_result_id": "906a61d4-9e9b-44df-81a2-0d4b3d685d70"
+  }'
+```
+
+**Success Response:**
 ```json
 {
     "success": true,
-    "message": "Lead enriched successfully",
+    "message": "Lead created and enriched successfully",
     "lead": {
-        "id": "uuid",
-        "first_name": "John",
-        "last_name": "Doe",
-        "title": "Senior Software Engineer",
-        "company_name": "Tech Corp",
-        "location": "San Francisco Bay Area",
-        "enrichment_status": "completed",
-        "is_enriched": true,
-        "enriched_data": {
-            "firstName": "John",
-            "lastName": "Doe",
-            "headline": "Senior Software Engineer at Tech Corp",
-            "company": "Tech Corp",
-            "location": "San Francisco Bay Area",
-            "summary": "Experienced software engineer...",
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "account_id": "0cba4319-1bac-4399-a616-caf4367790fd",
+        "company_id": "9302e04a-d558-4e9c-b4ae-548c8146082a",
+        "company_banner_id": "d70b795e-7041-495d-bc4c-2408bfdb7b48",
+        "source_query_id": "26b49b5a-4036-43f4-85a7-fdace10e3b0f",
+        "google_result_id": "906a61d4-9e9b-44df-81a2-0d4b3d685d70",
+        "source_link": "https://linkedin.com/in/sarptecimer",
+        "source_username": "sarptecimer",
+        "full_name": "Sarp Tecimer",
+        "title": "Cybersecurity Consultant, Advisor, Vendor and Channel Management Professional",
+        "company_name": "Kafein Technology Solutions",
+        "email": null,
+        "location": "Istanbul, Türkiye",
+        "enrichment_status": "enriched",
+        "enrichment_payload": {
+            "basic_info": {
+                "fullname": "Sarp Tecimer",
+                "headline": "Cybersecurity Consultant, Advisor, Vendor and Channel Management Professional",
+                "current_company": "Kafein Technology Solutions",
+                "location": {"full": "Istanbul, Türkiye"},
+                "about": "Cyber security consultant...",
+                "profile_url": "https://linkedin.com/in/sarptecimer"
+            },
             "experience": [...],
             "education": [...],
-            "skills": [...]
+            "skills": [...],
+            "certifications": [...]
         },
-        "last_enriched_at": "2024-01-01T12:05:00Z"
+        "last_enriched_at": "2025-10-08T12:31:11.376701+00:00",
+        "created_at": "2025-10-08T12:31:11.77729+00:00"
     }
 }
 ```
 
+**Error Responses:**
+
+Missing required fields:
+```json
+{
+    "success": false,
+    "message": "For non-existing leads, account_id, company_id, created_by, and google_result_id are required",
+    "lead": null
+}
+```
+
+Google result not found:
+```json
+{
+    "success": false,
+    "message": "No search result found for this google_result_id",
+    "lead": null
+}
+```
+
+Invalid LinkedIn URL:
+```json
+{
+    "success": false,
+    "message": "Search result does not contain a LinkedIn profile URL",
+    "lead": null
+}
+```
+
+Apify enrichment failed:
+```json
+{
+    "success": false,
+    "message": "Failed to run enrichment: [error details]",
+    "lead": null
+}
+```
+
 #### Bulk Enrich Leads
-Enriches multiple leads in a single batch operation.
+Enriches multiple leads in a single batch operation using multiple Google search result IDs.
 
 ```http
 POST /api/leads/bulk-enrich
 Content-Type: application/json
 
 {
-    "lead_ids": ["uuid1", "uuid2", "uuid3"]
+    "account_id": "uuid",
+    "company_id": "uuid",
+    "created_by": "uuid",
+    "company_banner_id": "uuid",           // Optional
+    "source_query_id": "uuid",             // Optional
+    "google_result_ids": ["uuid1", "uuid2", "uuid3"]  // Required - Array of IDs
 }
 ```
 
-**Response:**
+**Example Request:**
+```bash
+curl -X POST http://localhost:3000/api/leads/bulk-enrich \
+  -H "Content-Type: application/json" \
+  -d '{
+    "account_id": "0cba4319-1bac-4399-a616-caf4367790fd",
+    "company_id": "9302e04a-d558-4e9c-b4ae-548c8146082a",
+    "created_by": "406f34af-9d1e-44d2-82c3-d910afe7fb5b",
+    "company_banner_id": "d70b795e-7041-495d-bc4c-2408bfdb7b48",
+    "source_query_id": "26b49b5a-4036-43f4-85a7-fdace10e3b0f",
+    "google_result_ids": [
+      "906a61d4-9e9b-44df-81a2-0d4b3d685d70",
+      "123e4567-e89b-12d3-a456-426614174000",
+      "987fcdeb-51a2-43d1-9c45-123456789abc"
+    ]
+  }'
+```
+
+**Success Response:**
 ```json
 {
     "success": true,
-    "message": "Batch enrichment completed for 3 leads",
-    "results": [
+    "message": "Bulk enrichment completed successfully. 3 leads processed, 2 successful, 1 failed",
+    "leads_processed": 3,
+    "leads_successful": 2,
+    "leads_failed": 1,
+    "leads": [
         {
-            "id": "uuid1",
-            "enrichment_status": "completed",
-            "is_enriched": true
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "full_name": "John Doe",
+            "title": "Software Engineer",
+            "enrichment_status": "enriched",
+            "google_result_id": "906a61d4-9e9b-44df-81a2-0d4b3d685d70"
+        },
+        {
+            "id": "b2c3d4e5-f6g7-8901-bcde-f23456789012",
+            "full_name": "Jane Smith",
+            "title": "Product Manager",
+            "enrichment_status": "enriched",
+            "google_result_id": "123e4567-e89b-12d3-a456-426614174000"
+        }
+    ],
+    "failed_results": [
+        {
+            "google_result_id": "987fcdeb-51a2-43d1-9c45-123456789abc",
+            "error": "No search result found for this google_result_id"
         }
     ]
+}
+```
+
+**Error Response:**
+```json
+{
+    "success": false,
+    "message": "No google_result_ids provided",
+    "leads_processed": 0,
+    "leads_successful": 0,
+    "leads_failed": 0,
+    "leads": [],
+    "failed_results": []
 }
 ```
 
@@ -208,59 +346,132 @@ Content-Type: application/json
 
 ## Field Descriptions
 
-### Lead Fields
-- `profile_url`: LinkedIn profile URL (required)
-- `first_name`: Lead's first name
-- `last_name`: Lead's last name  
-- `title`: Current job title/headline
-- `company_name`: Current company
-- `location`: Geographic location
-- `notes`: Additional notes or context
+### Request Fields
+- `account_id`: UUID of the account (required)
+- `company_id`: UUID of the company (required)
+- `created_by`: UUID of the user creating the lead (required)
+- `company_banner_id`: UUID of company banner (optional)
+- `source_query_id`: UUID of originating search query (optional)
+- `google_result_id`: UUID from google_search_results table (required for single enrichment)
+- `google_result_ids`: Array of UUIDs from google_search_results table (required for bulk enrichment)
+
+### Response Lead Fields
+- `id`: Auto-generated UUID for the lead
+- `source_link`: LinkedIn profile URL from Google search results
+- `source_username`: LinkedIn username/public identifier
+- `full_name`: Contact's full name from LinkedIn
+- `title`: Current job title/headline from LinkedIn
+- `company_name`: Current company from LinkedIn
+- `email`: Email address (if public on LinkedIn)
+- `location`: Geographic location from LinkedIn
 - `enrichment_status`: Current enrichment status
-- `is_enriched`: Boolean indicating if profile is enriched
-- `enriched_data`: Full enriched profile data from Apify
-- `apify_actor_run_id`: Apify run ID for tracking
+- `enrichment_payload`: Complete JSON response from Apify
+- `last_enriched_at`: Timestamp of last enrichment
+- `created_at`: Lead creation timestamp
 
 ### Enrichment Status Values
 - `pending`: Not yet enriched
-- `running`: Currently being enriched
-- `completed`: Successfully enriched
+- `in_progress`: Currently being enriched
+- `enriched`: Successfully enriched
 - `failed`: Enrichment failed
 
 ## Enriched Data Structure
 
-The `enriched_data` field contains comprehensive LinkedIn profile information:
+The `enrichment_payload` field contains comprehensive LinkedIn profile information from Apify:
 
 ```json
 {
-    "firstName": "John",
-    "lastName": "Doe", 
-    "headline": "Senior Software Engineer at Tech Corp",
-    "company": "Tech Corp",
-    "location": "San Francisco Bay Area",
-    "summary": "Experienced software engineer with 8+ years...",
+    "basic_info": {
+        "fullname": "Sarp Tecimer",
+        "first_name": "Sarp",
+        "last_name": "Tecimer",
+        "headline": "Cybersecurity Consultant, Advisor, Vendor and Channel Management Professional",
+        "public_identifier": "sarptecimer",
+        "profile_url": "https://linkedin.com/in/sarptecimer",
+        "profile_picture_url": "https://media.licdn.com/dms/image/...",
+        "about": "Cyber security consultant with a base of business administration...",
+        "location": {
+            "country": "Türkiye",
+            "city": "Istanbul", 
+            "full": "Istanbul, Türkiye",
+            "country_code": "TR"
+        },
+        "current_company": "Kafein Technology Solutions",
+        "current_company_url": "https://www.linkedin.com/company/kafein-technology-solutions",
+        "follower_count": 2018,
+        "connection_count": 2010,
+        "email": null,
+        "is_premium": false,
+        "is_creator": true,
+        "creator_hashtags": ["compliance", "datasecurity", "itmanagement"]
+    },
     "experience": [
         {
-            "title": "Senior Software Engineer",
-            "company": "Tech Corp",
-            "startDate": "2020-01",
-            "endDate": "Present",
-            "description": "Lead development of..."
+            "title": "Senior Product Owner",
+            "company": "Kafein Technology Solutions",
+            "location": "Istanbul, Türkiye",
+            "description": "Building and managing product roadmaps...",
+            "duration": "Jun 2024 - Oct 2025 · 1 yr 5 mos",
+            "start_date": {"year": 2024, "month": "Jun"},
+            "end_date": {"year": 2025, "month": "Oct"},
+            "is_current": false,
+            "employment_type": "Full-time",
+            "location_type": "Hybrid",
+            "company_linkedin_url": "https://www.linkedin.com/company/642741/",
+            "company_logo_url": "https://media.licdn.com/dms/image/..."
         }
     ],
     "education": [
         {
-            "school": "University of California, Berkeley",
-            "degree": "Bachelor of Science",
-            "field": "Computer Science",
-            "startYear": 2012,
-            "endYear": 2016
+            "school": "Bahcesehir University",
+            "degree": "MBA., Yonetim Bilisim Sistemleri (MIS)",
+            "degree_name": "MBA.",
+            "field_of_study": "Yonetim Bilisim Sistemleri (MIS)",
+            "duration": "2007 - 2008",
+            "start_date": {"year": 2007},
+            "end_date": {"year": 2008},
+            "school_linkedin_url": "https://www.linkedin.com/company/31394/",
+            "school_logo_url": "https://media.licdn.com/dms/image/..."
         }
     ],
-    "skills": ["JavaScript", "Python", "React", "Node.js"],
-    "certifications": [...],
-    "languages": [...],
-    "volunteerExperience": [...]
+    "skills": [
+        "Relationship management",
+        "security architecture", 
+        "compliance",
+        "training",
+        "building new channels",
+        "partner onboarding",
+        "business development",
+        "channel management"
+    ],
+    "certifications": [
+        {
+            "name": "BCNE",
+            "issuer": "Brocade"
+        },
+        {
+            "name": "Blue Coat Accredited Sales Professional",
+            "issuer": "Blue Coat"
+        }
+    ],
+    "languages": [
+        {
+            "language": "English",
+            "proficiency": "Full professional proficiency"
+        },
+        {
+            "language": "German", 
+            "proficiency": "Elementary proficiency"
+        }
+    ],
+    "projects": [
+        {
+            "name": "Bulutt Belbil",
+            "description": "Modern city information system...",
+            "associated_with": "Turk Telekom",
+            "is_current": false
+        }
+    ]
 }
 ```
 
@@ -274,57 +485,131 @@ The `enriched_data` field contains comprehensive LinkedIn profile information:
 }
 ```
 
-## Rate Limiting & Processing
+## Technical Details
 
 ### Apify Integration
-- Uses Apify LinkedIn Profile Scraper actor
-- Supports batch processing of multiple profiles
-- Automatic retry logic for failed enrichments
-- Respects Apify API rate limits
+- Uses **apimaestro~linkedin-profile-detail** actor via synchronous API
+- Endpoint: `https://api.apify.com/v2/acts/apimaestro~linkedin-profile-detail/run-sync-get-dataset-items`
+- Real-time enrichment (no polling required)
+- Comprehensive profile data extraction
+- Automatic error handling and validation
 
 ### Processing Times
-- Single lead enrichment: 30-60 seconds
-- Batch enrichment: 2-10 minutes (depending on size)
-- Maximum wait time: 5 minutes (single), 10 minutes (batch)
+- Single lead enrichment: 10-30 seconds (synchronous)
+- Bulk enrichment: 1-5 minutes (depending on batch size)
+- No timeout issues - completes when ready
 
-## Example Usage Flow
+### Data Flow
+1. **Input**: `google_result_id` from request payload
+2. **Lookup**: Query `google_search_results` table for LinkedIn URL
+3. **Validation**: Ensure URL is a valid LinkedIn profile
+4. **Enrichment**: Send to Apify for profile scraping
+5. **Storage**: Create lead record with enriched data
+6. **Response**: Return complete lead object
 
-1. **Create Lead**: Add a LinkedIn profile to track
-2. **Enrich Profile**: Get detailed profile information
-3. **Review Data**: Access enriched profile data
-4. **Bulk Operations**: Process multiple leads efficiently
+## Complete Usage Examples
+
+### Single Lead Enrichment Workflow
 
 ```bash
-# 1. Create a lead
-curl -X POST http://localhost:5000/api/leads \
+# Step 1: Enrich a single lead from Google search result
+curl -X POST http://localhost:3000/api/leads/my-custom-lead-id/enrich \
   -H "Content-Type: application/json" \
   -d '{
-    "account_id": "123e4567-e89b-12d3-a456-426614174000",
-    "company_id": "987fcdeb-51a2-43d1-9c45-123456789abc",
-    "created_by": "456e7890-e89b-12d3-a456-426614174111", 
-    "profile_url": "https://linkedin.com/in/johndoe",
-    "notes": "Potential senior engineer candidate"
+    "account_id": "0cba4319-1bac-4399-a616-caf4367790fd",
+    "company_id": "9302e04a-d558-4e9c-b4ae-548c8146082a", 
+    "created_by": "406f34af-9d1e-44d2-82c3-d910afe7fb5b",
+    "company_banner_id": "d70b795e-7041-495d-bc4c-2408bfdb7b48",
+    "source_query_id": "26b49b5a-4036-43f4-85a7-fdace10e3b0f",
+    "google_result_id": "906a61d4-9e9b-44df-81a2-0d4b3d685d70"
   }'
 
-# 2. Enrich the lead (using returned lead ID)
-curl -X POST http://localhost:5000/api/leads/lead-uuid/enrich
+# Step 2: Get the enriched lead data
+curl http://localhost:3000/api/leads/{returned_lead_uuid}
+```
 
-# 3. Get enriched lead data
-curl http://localhost:5000/api/leads/lead-uuid
+### Bulk Lead Enrichment Workflow
 
-# 4. Create leads from search results
-curl -X POST http://localhost:5000/api/leads/from-search/query-uuid \
+```bash
+# Enrich multiple leads from Google search results
+curl -X POST http://localhost:3000/api/leads/bulk-enrich \
   -H "Content-Type: application/json" \
   -d '{
-    "account_id": "123e4567-e89b-12d3-a456-426614174000",
-    "company_id": "987fcdeb-51a2-43d1-9c45-123456789abc",
-    "created_by": "456e7890-e89b-12d3-a456-426614174111"
-  }'
-
-# 5. Bulk enrich multiple leads
-curl -X POST http://localhost:5000/api/leads/bulk-enrich \
-  -H "Content-Type: application/json" \
-  -d '{
-    "lead_ids": ["uuid1", "uuid2", "uuid3"]
+    "account_id": "0cba4319-1bac-4399-a616-caf4367790fd",
+    "company_id": "9302e04a-d558-4e9c-b4ae-548c8146082a",
+    "created_by": "406f34af-9d1e-44d2-82c3-d910afe7fb5b",
+    "company_banner_id": "d70b795e-7041-495d-bc4c-2408bfdb7b48",
+    "source_query_id": "26b49b5a-4036-43f4-85a7-fdace10e3b0f",
+    "google_result_ids": [
+      "906a61d4-9e9b-44df-81a2-0d4b3d685d70",
+      "123e4567-e89b-12d3-a456-426614174000",
+      "987fcdeb-51a2-43d1-9c45-123456789abc",
+      "456f7890-e12b-34c5-d678-901234567890"
+    ]
   }'
 ```
+
+### Query Existing Leads
+
+```bash
+# Get all leads for an account
+curl http://localhost:3000/api/leads/accounts/0cba4319-1bac-4399-a616-caf4367790fd
+
+# Get enriched leads only
+curl http://localhost:3000/api/leads/accounts/0cba4319-1bac-4399-a616-caf4367790fd?enriched_only=true
+
+# Get leads by company
+curl http://localhost:3000/api/leads/companies/9302e04a-d558-4e9c-b4ae-548c8146082a
+
+# Get specific lead
+curl http://localhost:3000/api/leads/a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+## Common Error Scenarios
+
+### Invalid Google Result ID
+```bash
+curl -X POST http://localhost:3000/api/leads/test-lead/enrich \
+  -H "Content-Type: application/json" \
+  -d '{"account_id": "...", "google_result_id": "invalid-uuid"}'
+
+# Response:
+{
+  "success": false,
+  "message": "No search result found for this google_result_id",
+  "lead": null
+}
+```
+
+### Missing Required Fields
+```bash
+curl -X POST http://localhost:3000/api/leads/test-lead/enrich \
+  -H "Content-Type: application/json" \
+  -d '{"account_id": "..."}'
+
+# Response:
+{
+  "success": false,
+  "message": "For non-existing leads, account_id, company_id, created_by, and google_result_id are required",
+  "lead": null
+}
+```
+
+### Non-LinkedIn URL in Search Results
+```bash
+# If google_result_id points to non-LinkedIn URL
+{
+  "success": false,
+  "message": "Search result does not contain a LinkedIn profile URL",
+  "lead": null
+}
+```
+
+## Integration Notes
+
+- **Lead IDs**: Can be any string - system generates UUID if needed
+- **Google Search Results**: Must exist in `google_search_results` table
+- **Batch Processing**: Recommended for processing multiple leads efficiently
+- **Error Handling**: Partial success supported in bulk operations
+- **Data Persistence**: All enriched data stored in `enrichment_payload` field
+- **Real-time**: Synchronous API provides immediate results

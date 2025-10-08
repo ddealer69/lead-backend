@@ -7,6 +7,7 @@ import os
 import json
 import requests
 import time
+import uuid
 from typing import Optional, Dict, Any, List
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -32,7 +33,7 @@ class LeadsManager:
             raise ValueError("Missing APIFY_API_TOKEN in environment")
         
         self.apify_base_url = "https://api.apify.com/v2"
-        self.linkedin_actor_id = "apify/linkedin-profile-scraper"
+        self.linkedin_actor_id = "apimaestro~linkedin-profile-detail"
     
     def verify_account_exists(self, account_id: str) -> bool:
         """Verify that the account exists and is active"""
@@ -388,18 +389,31 @@ class LeadsManager:
     
     # ===================== HELPER METHODS =====================
     
-    def get_profile_url_from_search_result(self, lead_id: str) -> Dict[str, Any]:
+    def _generate_or_validate_uuid(self, lead_id: str) -> str:
         """
-        Get LinkedIn profile URL from google_search_results table using lead_id
+        Generate a proper UUID if the provided lead_id is not a valid UUID
+        Returns: A valid UUID string
+        """
+        try:
+            # Try to parse as UUID to validate
+            uuid.UUID(lead_id)
+            return lead_id
+        except ValueError:
+            # Generate a new UUID if the provided ID is not valid
+            return str(uuid.uuid4())
+    
+    def get_profile_url_from_search_result(self, google_result_id: str) -> Dict[str, Any]:
+        """
+        Get LinkedIn profile URL from google_search_results table using google_result_id
         Returns: {'success': bool, 'message': str, 'profile_url': str or None}
         """
         try:
-            search_result = self.supabase.table('google_search_results').select('link, title').eq('id', lead_id).execute()
+            search_result = self.supabase.table('google_search_results').select('link, title').eq('id', google_result_id).execute()
             
             if not search_result.data:
                 return {
                     'success': False,
-                    'message': 'No search result found for this lead ID',
+                    'message': 'No search result found for this google_result_id',
                     'profile_url': None
                 }
             
@@ -430,8 +444,8 @@ class LeadsManager:
     
     def start_apify_enrichment(self, profile_urls: List[str]) -> Dict[str, Any]:
         """
-        Start Apify actor run for LinkedIn profile enrichment
-        Returns: {'success': bool, 'message': str, 'run_id': str or None}
+        Run Apify actor synchronously for LinkedIn profile enrichment
+        Returns: {'success': bool, 'message': str, 'results': list}
         """
         try:
             # Prepare input for Apify LinkedIn scraper
@@ -440,36 +454,37 @@ class LeadsManager:
                 "proxyConfig": {"useApifyProxy": True}
             }
             
-            # Start actor run
-            url = f"{self.apify_base_url}/acts/{self.linkedin_actor_id}/runs"
+            # Use sync API endpoint
+            url = f"{self.apify_base_url}/acts/{self.linkedin_actor_id}/run-sync-get-dataset-items"
+            params = {
+                "token": self.apify_api_token
+            }
             headers = {
-                "Authorization": f"Bearer {self.apify_api_token}",
                 "Content-Type": "application/json"
             }
             
-            response = requests.post(url, json=apify_input, headers=headers, timeout=30)
+            response = requests.post(url, json=apify_input, headers=headers, params=params, timeout=300)
             
-            if response.status_code == 201:
-                run_data = response.json()
-                run_id = run_data['data']['id']
+            if response.status_code in [200, 201]:
+                results = response.json()
                 
                 return {
                     'success': True,
-                    'message': f'Apify enrichment started successfully',
-                    'run_id': run_id
+                    'message': f'Apify enrichment completed successfully',
+                    'results': results
                 }
             else:
                 return {
                     'success': False,
-                    'message': f'Failed to start Apify enrichment: {response.status_code} - {response.text}',
-                    'run_id': None
+                    'message': f'Failed to run Apify enrichment: {response.status_code} - {response.text}',
+                    'results': []
                 }
                 
         except Exception as e:
             return {
                 'success': False,
-                'message': f'Error starting Apify enrichment: {str(e)}',
-                'run_id': None
+                'message': f'Error running Apify enrichment: {str(e)}',
+                'results': []
             }
     
     def check_apify_run_status(self, run_id: str) -> Dict[str, Any]:
@@ -548,168 +563,195 @@ class LeadsManager:
     
     # ===================== LEAD ENRICHMENT WORKFLOW =====================
     
-    def enrich_lead(self, lead_id: str) -> Dict[str, Any]:
+    def enrich_lead(self, lead_id: str, account_id: str = None, company_id: str = None, created_by: str = None,
+                   company_banner_id: str = None, source_query_id: str = None, google_result_id: str = None) -> Dict[str, Any]:
         """
         Enrich a single lead using Apify
-        Gets LinkedIn URL from google_search_results table based on lead_id
+        If lead doesn't exist, gets LinkedIn URL from google_search_results table and creates lead after enrichment
         Returns: {'success': bool, 'message': str, 'lead': dict or None}
         """
         try:
-            # Get lead details
+            # Try to get lead details
             lead_result = self.get_lead(lead_id)
-            if not lead_result['success']:
-                return {
-                    'success': False,
-                    'message': 'Lead not found',
-                    'lead': None
-                }
+            lead_exists = lead_result['success']
             
-            lead = lead_result['lead']
+            if lead_exists:
+                lead = lead_result['lead']
+                # Check if already enriched
+                if lead.get('enrichment_status') == 'enriched':
+                    return {
+                        'success': False,
+                        'message': 'Lead already enriched',
+                        'lead': lead
+                    }
+                profile_url = lead.get('source_link')
+                if not profile_url and google_result_id:
+                    # Get LinkedIn URL from google_search_results table using google_result_id
+                    url_result = self.get_profile_url_from_search_result(google_result_id)
+                    if not url_result['success']:
+                        return {
+                            'success': False,
+                            'message': url_result['message'],
+                            'lead': lead
+                        }
+                    profile_url = url_result['profile_url']
+                elif not profile_url:
+                    return {
+                        'success': False,
+                        'message': 'No profile URL found for existing lead and no google_result_id provided',
+                        'lead': lead
+                    }
+            else:
+                # Lead doesn't exist, google_result_id is required to get LinkedIn URL
+                if not google_result_id:
+                    return {
+                        'success': False,
+                        'message': 'For non-existing leads, google_result_id is required to get LinkedIn profile URL',
+                        'lead': None
+                    }
+                
+                url_result = self.get_profile_url_from_search_result(google_result_id)
             
-            # Check if already enriched
-            if lead['is_enriched']:
-                return {
-                    'success': False,
-                    'message': 'Lead already enriched',
-                    'lead': lead
-                }
+                if not url_result['success']:
+                    return {
+                        'success': False,
+                        'message': url_result['message'],
+                        'lead': None
+                    }
+                profile_url = url_result['profile_url']
+                
+                # Validate required parameters for creating new lead
+                if not account_id or not company_id or not created_by:
+                    return {
+                        'success': False,
+                        'message': 'For non-existing leads, account_id, company_id, and created_by are required',
+                        'lead': None
+                    }
             
-            # Get LinkedIn URL from google_search_results table using lead_id
-            url_result = self.get_profile_url_from_search_result(lead_id)
+            # Update status to running (only if lead exists)
+            if lead_exists:
+                self.update_lead(lead_id, {
+                    'enrichment_status': 'in_progress'
+                })
             
-            if not url_result['success']:
-                return {
-                    'success': False,
-                    'message': url_result['message'],
-                    'lead': lead
-                }
-            
-            profile_url = url_result['profile_url']
-            
-            # Update status to running
-            self.update_lead(lead_id, {
-                'enrichment_status': 'running'
-            })
-            
-            # Start Apify enrichment with URL from google_search_results
+            # Run Apify enrichment synchronously
             apify_result = self.start_apify_enrichment([profile_url])
             
             if not apify_result['success']:
+                if lead_exists:
+                    self.update_lead(lead_id, {
+                        'enrichment_status': 'failed'
+                    })
+                    return {
+                        'success': False,
+                        'message': f"Failed to run enrichment: {apify_result['message']}",
+                        'lead': self.get_lead(lead_id)['lead']
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'message': f"Failed to run enrichment: {apify_result['message']}",
+                        'lead': None
+                    }
+            
+            # Get results directly from sync response
+            results = apify_result['results']
+            
+            if results and len(results) > 0:
+                enriched_data = results[0]  # First result
+                
+                if lead_exists:
+                    # Update existing lead with enriched data
+                    update_data = {
+                        'enrichment_status': 'enriched',
+                        'enrichment_payload': enriched_data,
+                        'last_enriched_at': datetime.now().isoformat()
+                    }
+                    
+                    # Extract key fields from enriched data
+                    basic_info = enriched_data.get('basic_info', {})
+                    if basic_info.get('fullname'):
+                        update_data['full_name'] = basic_info['fullname']
+                    if basic_info.get('headline'):
+                        update_data['title'] = basic_info['headline']
+                    if basic_info.get('current_company'):
+                        update_data['company_name'] = basic_info['current_company']
+                    if basic_info.get('email'):
+                        update_data['email'] = basic_info['email']
+                    if basic_info.get('location', {}).get('full'):
+                        update_data['location'] = basic_info['location']['full']
+                    if basic_info.get('public_identifier'):
+                        update_data['source_username'] = basic_info['public_identifier']
+                    if basic_info.get('profile_url'):
+                        update_data['source_link'] = basic_info['profile_url']
+                    
+                    self.update_lead(lead_id, update_data)
+                    
+                    return {
+                        'success': True,
+                        'message': 'Lead enriched successfully',
+                        'lead': self.get_lead(lead_id)['lead']
+                    }
+                else:
+                    # Create new lead with enriched data
+                    valid_uuid = self._generate_or_validate_uuid(lead_id)
+                    lead_data = {
+                        'id': valid_uuid,  # Use a valid UUID
+                        'account_id': account_id,
+                        'company_id': company_id,
+                        'company_banner_id': company_banner_id,
+                        'source_query_id': source_query_id,
+                        'google_result_id': google_result_id,
+                        'source_link': profile_url,
+                        'full_name': enriched_data.get('basic_info', {}).get('fullname'),
+                        'title': enriched_data.get('basic_info', {}).get('headline'),
+                        'company_name': enriched_data.get('basic_info', {}).get('current_company'),
+                        'email': enriched_data.get('basic_info', {}).get('email'),
+                        'location': enriched_data.get('basic_info', {}).get('location', {}).get('full'),
+                        'source_username': enriched_data.get('basic_info', {}).get('public_identifier'),
+                        'enrichment_status': 'enriched',
+                        'enrichment_payload': enriched_data,
+                        'last_enriched_at': datetime.now().isoformat()
+                    }
+                    
+                    result = self.supabase.table('leads').insert(lead_data).execute()
+                    
+                    if result.data:
+                        return {
+                            'success': True,
+                            'message': 'Lead created and enriched successfully',
+                            'lead': result.data[0]
+                        }
+                    else:
+                        return {
+                            'success': False,
+                            'message': 'Failed to create lead with enriched data',
+                            'lead': None
+                        }
+            else:
+                # No enrichment data returned
+                if lead_exists:
+                    self.update_lead(lead_id, {
+                        'enrichment_status': 'failed'
+                    })
+                    return {
+                        'success': False,
+                        'message': 'No enrichment data returned',
+                        'lead': self.get_lead(lead_id)['lead']
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'message': 'No enrichment data returned',
+                        'lead': None
+                    }
+                
+        except Exception as e:
+            # Mark as failed (only if lead exists)
+            if 'lead_exists' in locals() and lead_exists:
                 self.update_lead(lead_id, {
                     'enrichment_status': 'failed'
                 })
-                return {
-                    'success': False,
-                    'message': f"Failed to start enrichment: {apify_result['message']}",
-                    'lead': self.get_lead(lead_id)['lead']
-                }
-            
-            run_id = apify_result['run_id']
-            
-            # Update lead with run ID
-            self.update_lead(lead_id, {
-                'apify_actor_run_id': run_id
-            })
-            
-            # Wait for completion (with timeout)
-            max_wait_time = 300  # 5 minutes
-            check_interval = 10   # 10 seconds
-            elapsed_time = 0
-            
-            while elapsed_time < max_wait_time:
-                status_result = self.check_apify_run_status(run_id)
-                
-                if status_result['success']:
-                    status = status_result['status']
-                    
-                    if status == 'SUCCEEDED':
-                        # Get results
-                        results_response = self.get_apify_run_results(run_id)
-                        
-                        if results_response['success'] and results_response['results']:
-                            enriched_data = results_response['results'][0]  # First result
-                            
-                            # Update lead with enriched data
-                            update_data = {
-                                'enrichment_status': 'completed',
-                                'is_enriched': True,
-                                'enriched_data': enriched_data,
-                                'last_enriched_at': datetime.now().isoformat()
-                            }
-                            
-                            # Extract key fields from enriched data
-                            if enriched_data.get('firstName'):
-                                update_data['first_name'] = enriched_data['firstName']
-                            if enriched_data.get('lastName'):
-                                update_data['last_name'] = enriched_data['lastName']
-                            if enriched_data.get('headline'):
-                                update_data['title'] = enriched_data['headline']
-                            if enriched_data.get('company'):
-                                update_data['company_name'] = enriched_data['company']
-                            if enriched_data.get('location'):
-                                update_data['location'] = enriched_data['location']
-                            
-                            self.update_lead(lead_id, update_data)
-                            
-                            return {
-                                'success': True,
-                                'message': 'Lead enriched successfully',
-                                'lead': self.get_lead(lead_id)['lead']
-                            }
-                        else:
-                            self.update_lead(lead_id, {
-                                'enrichment_status': 'failed'
-                            })
-                            return {
-                                'success': False,
-                                'message': 'No enrichment data returned',
-                                'lead': self.get_lead(lead_id)['lead']
-                            }
-                    
-                    elif status == 'FAILED':
-                        self.update_lead(lead_id, {
-                            'enrichment_status': 'failed'
-                        })
-                        return {
-                            'success': False,
-                            'message': 'Apify enrichment failed',
-                            'lead': self.get_lead(lead_id)['lead']
-                        }
-                    
-                    elif status in ['RUNNING', 'READY']:
-                        # Continue waiting
-                        time.sleep(check_interval)
-                        elapsed_time += check_interval
-                    else:
-                        # Unknown status
-                        self.update_lead(lead_id, {
-                            'enrichment_status': 'failed'
-                        })
-                        return {
-                            'success': False,
-                            'message': f'Unknown enrichment status: {status}',
-                            'lead': self.get_lead(lead_id)['lead']
-                        }
-                else:
-                    # Error checking status
-                    time.sleep(check_interval)
-                    elapsed_time += check_interval
-            
-            # Timeout
-            self.update_lead(lead_id, {
-                'enrichment_status': 'failed'
-            })
-            return {
-                'success': False,
-                'message': 'Enrichment timeout - process took too long',
-                'lead': self.get_lead(lead_id)['lead']
-            }
-                
-        except Exception as e:
-            # Mark as failed
-            self.update_lead(lead_id, {
-                'enrichment_status': 'failed'
-            })
             
             return {
                 'success': False,
@@ -717,195 +759,110 @@ class LeadsManager:
                 'lead': None
             }
     
-    def bulk_enrich_leads(self, lead_ids: List[str]) -> Dict[str, Any]:
+    def bulk_enrich_leads(self, google_result_ids: List[str], account_id: str, company_id: str, created_by: str,
+                         company_banner_id: str = None, source_query_id: str = None) -> Dict[str, Any]:
         """
         Enrich multiple leads in batch using Apify
-        Gets LinkedIn URLs from google_search_results table based on lead_ids
+        Gets LinkedIn URLs from google_search_results table based on google_result_ids
         Returns: {'success': bool, 'message': str, 'results': list}
         """
         try:
-            if not lead_ids:
+            if not google_result_ids:
                 return {
                     'success': False,
-                    'message': 'No lead IDs provided',
+                    'message': 'No google result IDs provided',
                     'results': []
                 }
             
-            # Get all leads and their corresponding search results
-            leads = []
+            # Get all LinkedIn URLs from google_search_results table
             profile_urls = []
+            valid_google_results = []
             
-            for lead_id in lead_ids:
-                lead_result = self.get_lead(lead_id)
-                if lead_result['success']:
-                    lead = lead_result['lead']
-                    if not lead['is_enriched']:
-                        # Get LinkedIn URL from google_search_results table
-                        url_result = self.get_profile_url_from_search_result(lead_id)
-                        
-                        if url_result['success']:
-                            profile_url = url_result['profile_url']
-                            leads.append(lead)
-                            profile_urls.append(profile_url)
-                            
-                            # Update status to running
-                            self.update_lead(lead_id, {
-                                'enrichment_status': 'running'
-                            })
+            for google_result_id in google_result_ids:
+                url_result = self.get_profile_url_from_search_result(google_result_id)
+                
+                if url_result['success']:
+                    profile_urls.append(url_result['profile_url'])
+                    valid_google_results.append({
+                        'google_result_id': google_result_id,
+                        'profile_url': url_result['profile_url']
+                    })
             
-            if not leads:
+            if not profile_urls:
                 return {
                     'success': False,
-                    'message': 'No valid leads to enrich',
+                    'message': 'No valid LinkedIn URLs found in search results',
                     'results': []
                 }
             
-            # Start Apify enrichment for all profiles
+            # Run Apify enrichment synchronously for all profiles
             apify_result = self.start_apify_enrichment(profile_urls)
             
             if not apify_result['success']:
-                # Mark all as failed
-                for lead in leads:
-                    self.update_lead(lead['id'], {
-                        'enrichment_status': 'failed'
-                    })
-                
                 return {
                     'success': False,
-                    'message': f"Failed to start batch enrichment: {apify_result['message']}",
+                    'message': f"Failed to run batch enrichment: {apify_result['message']}",
                     'results': []
                 }
             
-            run_id = apify_result['run_id']
+            # Get results directly from sync response
+            enrichment_results = apify_result['results']
             
-            # Update all leads with run ID
-            for lead in leads:
-                self.update_lead(lead['id'], {
-                    'apify_actor_run_id': run_id
-                })
+            if not enrichment_results:
+                return {
+                    'success': False,
+                    'message': 'No enrichment data returned from Apify',
+                    'results': []
+                }
             
-            # Wait for completion
-            max_wait_time = 600  # 10 minutes for batch
-            check_interval = 15   # 15 seconds
-            elapsed_time = 0
+            processed_leads = []
             
-            while elapsed_time < max_wait_time:
-                status_result = self.check_apify_run_status(run_id)
-                
-                if status_result['success']:
-                    status = status_result['status']
+            # Process each enrichment result and create leads
+            for i, enriched_data in enumerate(enrichment_results):
+                if i < len(valid_google_results):
+                    google_result_info = valid_google_results[i]
+                    profile_url = google_result_info['profile_url']
+                    google_result_id = google_result_info['google_result_id']
                     
-                    if status == 'SUCCEEDED':
-                        # Get results
-                        results_response = self.get_apify_run_results(run_id)
-                        
-                        if results_response['success']:
-                            enrichment_results = results_response['results']
-                            processed_leads = []
-                            
-                            # Match results to leads by profile URL
-                            # Note: profile_urls array matches leads array by index
-                            for i, lead in enumerate(leads):
-                                matching_result = None
-                                lead_profile_url = profile_urls[i]  # Get corresponding URL
-                                
-                                for result in enrichment_results:
-                                    if result.get('url') == lead_profile_url:
-                                        matching_result = result
-                                        break
-                                
-                                if matching_result:
-                                    # Update lead with enriched data
-                                    update_data = {
-                                        'enrichment_status': 'completed',
-                                        'is_enriched': True,
-                                        'enriched_data': matching_result,
-                                        'last_enriched_at': datetime.now().isoformat()
-                                    }
-                                    
-                                    # Extract key fields
-                                    if matching_result.get('firstName'):
-                                        update_data['first_name'] = matching_result['firstName']
-                                    if matching_result.get('lastName'):
-                                        update_data['last_name'] = matching_result['lastName']
-                                    if matching_result.get('headline'):
-                                        update_data['title'] = matching_result['headline']
-                                    if matching_result.get('company'):
-                                        update_data['company_name'] = matching_result['company']
-                                    if matching_result.get('location'):
-                                        update_data['location'] = matching_result['location']
-                                    
-                                    self.update_lead(lead['id'], update_data)
-                                    processed_leads.append(self.get_lead(lead['id'])['lead'])
-                                else:
-                                    # No matching result found
-                                    self.update_lead(lead['id'], {
-                                        'enrichment_status': 'failed'
-                                    })
-                                    processed_leads.append(self.get_lead(lead['id'])['lead'])
-                            
-                            return {
-                                'success': True,
-                                'message': f'Batch enrichment completed for {len(processed_leads)} leads',
-                                'results': processed_leads
-                            }
-                        else:
-                            # Mark all as failed
-                            for lead in leads:
-                                self.update_lead(lead['id'], {
-                                    'enrichment_status': 'failed'
-                                })
-                            
-                            return {
-                                'success': False,
-                                'message': 'No enrichment data returned',
-                                'results': []
-                            }
+                    # Generate a proper UUID for the lead
+                    lead_id = self.generate_or_validate_uuid(None)  # Generate new UUID
                     
-                    elif status == 'FAILED':
-                        # Mark all as failed
-                        for lead in leads:
-                            self.update_lead(lead['id'], {
-                                'enrichment_status': 'failed'
-                            })
-                        
-                        return {
-                            'success': False,
-                            'message': 'Batch enrichment failed',
-                            'results': []
-                        }
+                    # Create new lead with enriched data
+                    basic_info = enriched_data.get('basic_info', {})
+                    lead_data = {
+                        'id': lead_id,
+                        'account_id': account_id,
+                        'company_id': company_id,
+                        'company_banner_id': company_banner_id,
+                        'source_query_id': source_query_id,
+                        'google_result_id': google_result_id,
+                        'source_link': profile_url,
+                        'full_name': basic_info.get('fullname'),
+                        'title': basic_info.get('headline'),
+                        'company_name': basic_info.get('current_company'),
+                        'email': basic_info.get('email'),
+                        'location': basic_info.get('location', {}).get('full'),
+                        'source_username': basic_info.get('public_identifier'),
+                        'enrichment_status': 'enriched',
+                        'enrichment_payload': enriched_data,
+                        'last_enriched_at': datetime.now().isoformat()
+                    }
                     
-                    elif status in ['RUNNING', 'READY']:
-                        # Continue waiting
-                        time.sleep(check_interval)
-                        elapsed_time += check_interval
+                    result = self.supabase.table('leads').insert(lead_data).execute()
+                    
+                    if result.data:
+                        processed_leads.append(result.data[0])
                     else:
-                        # Unknown status - mark all as failed
-                        for lead in leads:
-                            self.update_lead(lead['id'], {
-                                'enrichment_status': 'failed'
-                            })
-                        
-                        return {
-                            'success': False,
-                            'message': f'Unknown enrichment status: {status}',
-                            'results': []
-                        }
-                else:
-                    # Error checking status
-                    time.sleep(check_interval)
-                    elapsed_time += check_interval
-            
-            # Timeout - mark all as failed
-            for lead in leads:
-                self.update_lead(lead['id'], {
-                    'enrichment_status': 'failed'
-                })
+                        # Failed to create lead
+                        processed_leads.append({
+                            'error': f'Failed to create lead for google_result_id: {google_result_id}',
+                            'google_result_id': google_result_id
+                        })
             
             return {
-                'success': False,
-                'message': 'Batch enrichment timeout - process took too long',
-                'results': []
+                'success': True,
+                'message': f'Batch enrichment completed for {len(processed_leads)} leads',
+                'results': processed_leads
             }
                 
         except Exception as e:

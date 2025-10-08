@@ -1460,7 +1460,26 @@ def get_leads_by_query(query_id):
 def enrich_lead(lead_id):
     """Enrich a single lead using Apify LinkedIn scraper"""
     try:
-        result = leads_manager.enrich_lead(lead_id)
+        # Get optional parameters for creating new leads
+        account_id = None
+        company_id = None
+        created_by = None
+        company_banner_id = None
+        source_query_id = None
+        google_result_id = None
+        
+        # Check if request has JSON data
+        if request.is_json:
+            data = request.get_json() or {}
+            account_id = data.get('account_id')
+            company_id = data.get('company_id')
+            created_by = data.get('created_by')
+            company_banner_id = data.get('company_banner_id')
+            source_query_id = data.get('source_query_id')
+            google_result_id = data.get('google_result_id')
+        
+        result = leads_manager.enrich_lead(lead_id, account_id, company_id, created_by, 
+                                         company_banner_id, source_query_id, google_result_id)
         
         if result['success']:
             logger.info(f"Lead enriched: {lead_id}")
@@ -1480,7 +1499,12 @@ def bulk_enrich_leads():
     """
     Enrich multiple leads in batch using Apify
     Expected JSON: {
-        "lead_ids": ["uuid1", "uuid2", "uuid3"]
+        "google_result_ids": ["uuid1", "uuid2", "uuid3"],
+        "account_id": "uuid",
+        "company_id": "uuid", 
+        "created_by": "uuid",
+        "company_banner_id": "uuid" (optional),
+        "source_query_id": "uuid" (optional)
     }
     """
     try:
@@ -1492,18 +1516,30 @@ def bulk_enrich_leads():
                 'message': 'No JSON data provided'
             }), 400
         
-        lead_ids = data.get('lead_ids', [])
+        google_result_ids = data.get('google_result_ids', [])
+        account_id = data.get('account_id')
+        company_id = data.get('company_id')
+        created_by = data.get('created_by')
+        company_banner_id = data.get('company_banner_id')
+        source_query_id = data.get('source_query_id')
         
-        if not lead_ids or not isinstance(lead_ids, list):
+        if not google_result_ids or not isinstance(google_result_ids, list):
             return jsonify({
                 'success': False,
-                'message': 'lead_ids must be a non-empty array'
+                'message': 'google_result_ids must be a non-empty array'
+            }), 400
+            
+        if not account_id or not company_id or not created_by:
+            return jsonify({
+                'success': False,
+                'message': 'account_id, company_id, and created_by are required'
             }), 400
         
-        result = leads_manager.bulk_enrich_leads(lead_ids)
+        result = leads_manager.bulk_enrich_leads(google_result_ids, account_id, company_id, created_by, 
+                                               company_banner_id, source_query_id)
         
         if result['success']:
-            logger.info(f"Bulk enrichment completed for {len(lead_ids)} leads")
+            logger.info(f"Bulk enrichment completed for {len(google_result_ids)} leads")
             return jsonify(result), 200
         else:
             return jsonify(result), 400
