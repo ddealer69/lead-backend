@@ -795,70 +795,76 @@ class LeadsManager:
                     'results': []
                 }
             
-            # Run Apify enrichment synchronously for all profiles
-            for url in profile_urls:
-                apify_result = self.start_apify_enrichment(url)
-
-            if not apify_result['success']:
-                return {
-                    'success': False,
-                    'message': f"Failed to run batch enrichment: {apify_result['message']}",
-                    'results': []
-                }
-            
-            # Get results directly from sync response
-            enrichment_results = apify_result['results']
-            
-            if not enrichment_results:
-                return {
-                    'success': False,
-                    'message': 'No enrichment data returned from Apify',
-                    'results': []
-                }
-            
+            # Run Apify enrichment synchronously for each profile one by one
             processed_leads = []
             
-            # Process each enrichment result and create leads
-            for i, enriched_data in enumerate(enrichment_results):
-                if i < len(valid_google_results):
-                    google_result_info = valid_google_results[i]
-                    profile_url = google_result_info['profile_url']
-                    google_result_id = google_result_info['google_result_id']
-                    
-                    # Generate a proper UUID for the lead
-                    lead_id = self._generate_or_validate_uuid(None)  # Generate new UUID
-                    
-                    # Create new lead with enriched data
-                    basic_info = enriched_data.get('basic_info', {})
-                    lead_data = {
-                        'id': lead_id,
-                        'account_id': account_id,
-                        'company_id': company_id,
-                        'company_banner_id': company_banner_id,
-                        'source_query_id': source_query_id,
+            for i, google_result_info in enumerate(valid_google_results):
+                profile_url = google_result_info['profile_url']
+                google_result_id = google_result_info['google_result_id']
+                
+                # Run enrichment for this single URL
+                apify_result = self.start_apify_enrichment([profile_url])
+                
+                if not apify_result['success']:
+                    # Add error entry for this failed enrichment
+                    processed_leads.append({
+                        'error': f'Failed to enrich profile: {apify_result["message"]}',
                         'google_result_id': google_result_id,
-                        'source_link': profile_url,
-                        'full_name': basic_info.get('fullname'),
-                        'title': basic_info.get('headline'),
-                        'company_name': basic_info.get('current_company'),
-                        'email': basic_info.get('email'),
-                        'location': basic_info.get('location', {}).get('full'),
-                        'source_username': basic_info.get('public_identifier'),
-                        'enrichment_status': 'enriched',
-                        'enrichment_payload': enriched_data,
-                        'last_enriched_at': datetime.now().isoformat()
-                    }
-                    
-                    result = self.supabase.table('leads').insert(lead_data).execute()
-                    
-                    if result.data:
-                        processed_leads.append(result.data[0])
-                    else:
-                        # Failed to create lead
-                        processed_leads.append({
-                            'error': f'Failed to create lead for google_result_id: {google_result_id}',
-                            'google_result_id': google_result_id
-                        })
+                        'profile_url': profile_url
+                    })
+                    continue
+                
+                # Get results from this enrichment
+                enrichment_results = apify_result['results']
+                
+                if not enrichment_results or len(enrichment_results) == 0:
+                    # Add error entry for no data returned
+                    processed_leads.append({
+                        'error': 'No enrichment data returned from Apify',
+                        'google_result_id': google_result_id,
+                        'profile_url': profile_url
+                    })
+                    continue
+                
+                # Process the enrichment result and create lead
+                enriched_data = enrichment_results[0]  # First (and only) result
+                
+                # Generate a proper UUID for the lead
+                lead_id = self._generate_or_validate_uuid(None)  # Generate new UUID
+                
+                # Create new lead with enriched data
+                basic_info = enriched_data.get('basic_info', {})
+                lead_data = {
+                    'id': lead_id,
+                    'account_id': account_id,
+                    'company_id': company_id,
+                    'company_banner_id': company_banner_id,
+                    'source_query_id': source_query_id,
+                    'google_result_id': google_result_id,
+                    'source_link': profile_url,
+                    'full_name': basic_info.get('fullname'),
+                    'title': basic_info.get('headline'),
+                    'company_name': basic_info.get('current_company'),
+                    'email': basic_info.get('email'),
+                    'location': basic_info.get('location', {}).get('full'),
+                    'source_username': basic_info.get('public_identifier'),
+                    'enrichment_status': 'enriched',
+                    'enrichment_payload': enriched_data,
+                    'last_enriched_at': datetime.now().isoformat()
+                }
+                
+                # Insert lead into database
+                result = self.supabase.table('leads').insert(lead_data).execute()
+                
+                if result.data:
+                    processed_leads.append(result.data[0])
+                else:
+                    # Failed to create lead
+                    processed_leads.append({
+                        'error': f'Failed to create lead in database for google_result_id: {google_result_id}',
+                        'google_result_id': google_result_id,
+                        'profile_url': profile_url
+                    })
             
             return {
                 'success': True,
