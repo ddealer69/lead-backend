@@ -796,8 +796,9 @@ class LeadsManager:
                 }
             
             # Run Apify enrichment synchronously for all profiles
-            apify_result = self.start_apify_enrichment(profile_urls)
-            
+            for url in profile_urls:
+                apify_result = self.start_apify_enrichment(url)
+
             if not apify_result['success']:
                 return {
                     'success': False,
@@ -825,7 +826,7 @@ class LeadsManager:
                     google_result_id = google_result_info['google_result_id']
                     
                     # Generate a proper UUID for the lead
-                    lead_id = self.generate_or_validate_uuid(None)  # Generate new UUID
+                    lead_id = self._generate_or_validate_uuid(None)  # Generate new UUID
                     
                     # Create new lead with enriched data
                     basic_info = enriched_data.get('basic_info', {})
