@@ -425,6 +425,75 @@ GET /api/email-delivery-logs/campaigns/{campaign_id}?event_type=delivered
 GET /api/email-delivery-logs/campaign-leads/{campaign_lead_id}
 ```
 
+### **NEW**: Campaign Email Sending
+
+#### Send Campaign Emails
+Sends emails to all queued leads in a campaign using the configured SMTP credentials and templates.
+
+```http
+POST /api/campaigns/{campaign_id}/send-emails
+```
+
+**Example Request:**
+```bash
+curl -X POST http://localhost:3000/api/campaigns/f47ac10b-58cc-4372-a567-0e02b2c3d479/send-emails \
+  -H "Content-Type: application/json"
+```
+
+**Success Response:**
+```json
+{
+    "success": true,
+    "message": "Campaign emails processed. 5 sent, 1 failed",
+    "campaign_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    "campaign_name": "Q4 Product Launch Campaign",
+    "emails_sent": 5,
+    "emails_failed": 1,
+    "total_processed": 6,
+    "results": [
+        {
+            "lead_id": "26b49b5a-4036-43f4-85a7-fdace10e3b0f",
+            "email": "john.doe@example.com",
+            "status": "sent",
+            "subject": "John Doe, exciting news from Tech Corp"
+        },
+        {
+            "lead_id": "123e4567-e89b-12d3-a456-426614174000",
+            "email": "jane.smith@example.com",
+            "status": "sent",
+            "subject": "Jane Smith, exciting news from Startup Inc"
+        },
+        {
+            "lead_id": "987fcdeb-51a2-43d1-9c45-123456789abc",
+            "email": null,
+            "status": "failed",
+            "error": "No email address available"
+        }
+    ]
+}
+```
+
+**Error Response:**
+```json
+{
+    "success": false,
+    "message": "Campaign not found",
+    "emails_sent": 0,
+    "emails_failed": 0,
+    "results": []
+}
+```
+
+**Process Overview:**
+1. **Campaign Validation**: Verifies campaign exists and is in sendable state (draft/running)
+2. **SMTP Retrieval**: Fetches SMTP credentials and decrypts password
+3. **Lead Processing**: Gets all queued campaign leads with their email details
+4. **Email Validation**: Skips leads without valid email addresses (null, empty, or whitespace-only)
+5. **Template Rendering**: Renders subject and body templates with personalization variables
+6. **Email Sending**: Sends emails via SMTP and updates lead status to 'sent' or 'failed'
+7. **Logging**: Creates email delivery logs for tracking
+8. **Status Updates**: Updates campaign lead statuses automatically
+
 ## **NEW**: Enhanced Personalization System
 
 ### Automatic Personalization Variables
@@ -456,6 +525,47 @@ Your LinkedIn profile ({{source_link}}) shows impressive experience.
 
 Best regards,
 Sales Team"
+```
+
+### **NEW**: Email Sending Process
+
+When you call the `/api/campaigns/{campaign_id}/send-emails` endpoint, the system:
+
+1. **Validates Campaign**: Ensures campaign exists and is in 'draft' or 'running' status
+2. **Retrieves SMTP Config**: Gets SMTP credentials and decrypts the password securely
+3. **Fetches Queued Leads**: Gets all campaign leads with status 'queued'
+4. **Email Validation**: Automatically skips leads with missing, null, empty, or whitespace-only email addresses
+5. **Renders Templates**: Replaces template variables with actual lead data:
+   - `{{full_name}}` or `{{name}}` → Lead's full name
+   - `{{company_name}}` → Lead's company name
+   - `{{email}}` → Lead's email address
+   - Plus any custom personalization variables
+6. **Sends Emails**: Uses SMTP to send personalized emails to valid email addresses only
+7. **Updates Status**: Changes campaign lead status from 'queued' to 'sent' or 'failed'
+8. **Creates Logs**: Generates email delivery logs for tracking
+
+**Template Example:**
+```html
+<html>
+  <body style="font-family: Arial, sans-serif; padding: 20px;">
+    <h2>Hello {{full_name}}!</h2>
+    <p>I noticed your role at {{company_name}} and wanted to connect.</p>
+    <p>Your experience as {{title}} is impressive.</p>
+    <p>Best regards,<br>Sales Team</p>
+  </body>
+</html>
+```
+
+**Rendered Output:**
+```html
+<html>
+  <body style="font-family: Arial, sans-serif; padding: 20px;">
+    <h2>Hello John Doe!</h2>
+    <p>I noticed your role at Tech Corp and wanted to connect.</p>
+    <p>Your experience as Senior Software Engineer is impressive.</p>
+    <p>Best regards,<br>Sales Team</p>
+  </body>
+</html>
 ```
 
 ## **NEW**: Email Delivery Event Tracking
@@ -596,22 +706,18 @@ curl -X PUT http://localhost:3000/api/campaigns/f47ac10b-58cc-4372-a567-0e02b2c3
   -H "Content-Type: application/json" \
   -d '{"status": "running"}'
 
-# Step 4: Log email delivery events
-curl -X POST http://localhost:3000/api/email-delivery-logs \
-  -H "Content-Type: application/json" \
-  -d '{
-    "campaign_lead_id": "b1d2c3e4-f5g6-7h8i-9j0k-l1m2n3o4p5q6",
-    "campaign_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    "smtp_credential_id": "d4daf7f7-1374-4857-afc0-99d50259e444",
-    "recipient": "john.doe@example.com",
-    "event_type": "delivered"
-  }'
+# Step 4: Send emails to all queued leads (NEW!)
+curl -X POST http://localhost:3000/api/campaigns/f47ac10b-58cc-4372-a567-0e02b2c3d479/send-emails \
+  -H "Content-Type: application/json"
 
 # Step 5: Monitor campaign progress
 curl http://localhost:3000/api/campaigns/f47ac10b-58cc-4372-a567-0e02b2c3d479/stats
 
 # Step 6: View campaign leads by company
 curl http://localhost:3000/api/campaign-leads/companies/9302e04a-d558-4e9c-b4ae-548c8146082a
+
+# Step 7: Check email delivery logs
+curl http://localhost:3000/api/email-delivery-logs/campaigns/f47ac10b-58cc-4372-a567-0e02b2c3d479
 ```
 
 ### Email Delivery Tracking Workflow
@@ -645,9 +751,13 @@ curl http://localhost:3000/api/email-delivery-logs/campaigns/f47ac10b-58cc-4372-
 1. **Auto-Personalization**: Campaign leads automatically fetch personalization data from leads table
 2. **Enhanced Retrieval**: Get campaign leads by company ID for better organization
 3. **Email Delivery Tracking**: Comprehensive logging of email delivery events
-4. **Better Integration**: Seamless connection between leads, campaigns, and delivery tracking
-5. **Improved Error Handling**: More descriptive error messages and validation
-6. **Performance Optimizations**: Indexed queries and efficient bulk operations
+4. **Automated Email Sending**: Single endpoint to send all queued campaign emails with template rendering
+5. **SMTP Integration**: Secure password decryption and multi-protocol SMTP support
+6. **Template Rendering**: Dynamic variable replacement in subject and body templates
+7. **Status Management**: Automatic campaign lead status updates after email sending
+8. **Better Integration**: Seamless connection between leads, campaigns, and delivery tracking
+9. **Improved Error Handling**: More descriptive error messages and validation
+10. **Performance Optimizations**: Indexed queries and efficient bulk operations
 
 ## Integration Notes
 
@@ -658,6 +768,12 @@ curl http://localhost:3000/api/email-delivery-logs/campaigns/f47ac10b-58cc-4372-
 - **Company-Level Queries**: Easy retrieval of campaign leads by company
 - **Real-time Statistics**: Live campaign performance metrics
 - **Provider Integration**: Support for any email service provider webhook data
+- **SMTP Security**: Encrypted password storage with secure decryption
+- **Template Engine**: Dynamic variable replacement with fallback values
+- **Email Sending**: Automatic SMTP protocol detection (SSL/TLS/Plain)
+- **Email Validation**: Automatic skipping of leads without valid email addresses
+- **Status Tracking**: Real-time campaign lead status updates
+- **Error Handling**: Comprehensive error logging and status management
 
 ## Technical Details
 
@@ -665,6 +781,7 @@ curl http://localhost:3000/api/email-delivery-logs/campaigns/f47ac10b-58cc-4372-
 - Campaigns belong to accounts and companies
 - Campaign leads link campaigns to leads table (not queries)
 - Email delivery logs track events for campaign leads
+- SMTP credentials store encrypted authentication data
 - Foreign key constraints ensure data integrity
 - Cascade deletes maintain consistency
 
@@ -673,9 +790,21 @@ curl http://localhost:3000/api/email-delivery-logs/campaigns/f47ac10b-58cc-4372-
 - Bulk operations minimize database round trips
 - Efficient personalization variable fetching
 - Optimized campaign lead retrieval by company
+- Batch email processing with status updates
 
 ### Security Features
 - Account and company validation before operations
 - Lead existence verification for campaign leads
 - Input validation for all status fields and enums
+- Encrypted SMTP password storage
+- Secure password decryption for email sending
 - Comprehensive error handling and logging
+
+### Email Sending Features
+- **Multi-Protocol SMTP**: Supports SSL (port 465), TLS (port 587), and plain (port 25)
+- **Template Rendering**: Dynamic variable replacement with {{variable}} syntax
+- **Email Validation**: Automatic skipping of leads with null, empty, or invalid email addresses
+- **Error Recovery**: Individual lead error handling without stopping batch process
+- **Status Management**: Automatic campaign lead status updates (queued → sent/failed)
+- **Delivery Logging**: Comprehensive email delivery event tracking
+- **Password Security**: Encrypted SMTP password storage with secure decryption

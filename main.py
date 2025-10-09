@@ -9,6 +9,7 @@ from flask_cors import CORS
 from db_utils import DatabaseManager
 from company_utils import CompanyManager
 from campaign_utils import CampaignManager, EmailDeliveryLogsManager
+from email_sender_utils import EmailSenderManager
 from smtp_utils import SMTPManager
 from social_utils import SocialManager
 from search_utils import SearchManager
@@ -28,6 +29,7 @@ user_manager = DatabaseManager()
 company_manager = CompanyManager()
 campaign_manager = CampaignManager()
 email_delivery_manager = EmailDeliveryLogsManager()
+email_sender_manager = EmailSenderManager()
 smtp_manager = SMTPManager()
 social_manager = SocialManager()
 search_manager = SearchManager()
@@ -2114,6 +2116,40 @@ def get_delivery_logs_by_campaign_lead(campaign_lead_id):
         return jsonify({
             'success': False,
             'message': 'Internal server error'
+        }), 500
+
+# ============================================================================
+# EMAIL SENDER ROUTES
+# ============================================================================
+
+@app.route('/api/campaigns/<campaign_id>/send-emails', methods=['POST'])
+def send_campaign_emails(campaign_id):
+    """Send emails to all queued leads in a campaign"""
+    try:
+        result = email_sender_manager.send_campaign_emails(campaign_id)
+        
+        if result['success']:
+            # Determine HTTP status code based on results
+            if result.get('emails_failed', 0) > 0 and result.get('emails_sent', 0) == 0:
+                # All failed
+                return jsonify(result), 400
+            elif result.get('emails_failed', 0) > 0:
+                # Partial success
+                return jsonify(result), 207  # Multi-status
+            else:
+                # All successful
+                return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Send campaign emails error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error',
+            'emails_sent': 0,
+            'emails_failed': 0,
+            'results': []
         }), 500
 
 # ============================================================================
