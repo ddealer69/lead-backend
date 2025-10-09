@@ -8,6 +8,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from db_utils import DatabaseManager
 from company_utils import CompanyManager
+from campaign_utils import CampaignManager
 from smtp_utils import SMTPManager
 from social_utils import SocialManager
 from search_utils import SearchManager
@@ -25,6 +26,7 @@ CORS(app)  # Enable CORS for all routes
 # Initialize managers
 user_manager = DatabaseManager()
 company_manager = CompanyManager()
+campaign_manager = CampaignManager()
 smtp_manager = SMTPManager()
 social_manager = SocialManager()
 search_manager = SearchManager()
@@ -1595,6 +1597,384 @@ def create_leads_from_search(query_id):
             
     except Exception as e:
         logger.error(f"Create leads from search error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+# ============================================================================
+# CAMPAIGN MANAGEMENT API
+# ============================================================================
+
+@app.route('/api/campaigns', methods=['POST'])
+def create_campaign():
+    """Create new campaign"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No data provided'
+            }), 400
+        
+        # Required fields
+        account_id = data.get('account_id')
+        company_id = data.get('company_id')
+        name = data.get('name')
+        
+        if not all([account_id, company_id, name]):
+            return jsonify({
+                'success': False,
+                'message': 'account_id, company_id, and name are required'
+            }), 400
+        
+        # Optional fields
+        campaign_type = data.get('campaign_type', 'email')
+        created_by = data.get('created_by')
+        company_banner_id = data.get('company_banner_id')
+        smtp_credential_id = data.get('smtp_credential_id')
+        subject_template = data.get('subject_template')
+        body_template = data.get('body_template')
+        send_rate_per_hour = data.get('send_rate_per_hour')
+        max_retries = data.get('max_retries', 3)
+        status = data.get('status', 'draft')
+        
+        result = campaign_manager.create_campaign(
+            account_id=account_id,
+            company_id=company_id,
+            name=name,
+            campaign_type=campaign_type,
+            created_by=created_by,
+            company_banner_id=company_banner_id,
+            smtp_credential_id=smtp_credential_id,
+            subject_template=subject_template,
+            body_template=body_template,
+            send_rate_per_hour=send_rate_per_hour,
+            max_retries=max_retries,
+            status=status
+        )
+        
+        if result['success']:
+            return jsonify(result), 201
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Create campaign error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaigns/<campaign_id>', methods=['GET'])
+def get_campaign(campaign_id):
+    """Get campaign by ID"""
+    try:
+        result = campaign_manager.get_campaign(campaign_id)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Get campaign error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaigns/<campaign_id>', methods=['PUT'])
+def update_campaign(campaign_id):
+    """Update campaign"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No data provided'
+            }), 400
+        
+        result = campaign_manager.update_campaign(campaign_id, data)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Update campaign error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaigns/<campaign_id>', methods=['DELETE'])
+def delete_campaign(campaign_id):
+    """Delete campaign"""
+    try:
+        result = campaign_manager.delete_campaign(campaign_id)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Delete campaign error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaigns/companies/<company_id>', methods=['GET'])
+def get_campaigns_by_company(company_id):
+    """Get all campaigns for a company"""
+    try:
+        status = request.args.get('status')
+        result = campaign_manager.get_campaigns_by_company(company_id, status)
+        
+        return jsonify(result), 200
+            
+    except Exception as e:
+        logger.error(f"Get campaigns by company error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaigns/accounts/<account_id>', methods=['GET'])
+def get_campaigns_by_account(account_id):
+    """Get all campaigns for an account"""
+    try:
+        status = request.args.get('status')
+        result = campaign_manager.get_campaigns_by_account(account_id, status)
+        
+        return jsonify(result), 200
+            
+    except Exception as e:
+        logger.error(f"Get campaigns by account error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaigns/<campaign_id>/stats', methods=['GET'])
+def get_campaign_stats(campaign_id):
+    """Get campaign statistics"""
+    try:
+        result = campaign_manager.get_campaign_stats(campaign_id)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Get campaign stats error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+# ============================================================================
+# CAMPAIGN LEADS MANAGEMENT API
+# ============================================================================
+
+@app.route('/api/campaign-leads', methods=['POST'])
+def create_campaign_lead():
+    """Create new campaign lead"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No data provided'
+            }), 400
+        
+        # Required fields
+        campaign_id = data.get('campaign_id')
+        query_id = data.get('query_id')
+        
+        if not all([campaign_id, query_id]):
+            return jsonify({
+                'success': False,
+                'message': 'campaign_id and query_id are required'
+            }), 400
+        
+        # Optional fields
+        status = data.get('status', 'queued')
+        send_attempts = data.get('send_attempts', 0)
+        last_sent_at = data.get('last_sent_at')
+        scheduled_at = data.get('scheduled_at')
+        personalization_vars = data.get('personalization_vars')
+        error = data.get('error')
+        
+        result = campaign_manager.create_campaign_lead(
+            campaign_id=campaign_id,
+            query_id=query_id,
+            status=status,
+            send_attempts=send_attempts,
+            last_sent_at=last_sent_at,
+            scheduled_at=scheduled_at,
+            personalization_vars=personalization_vars,
+            error=error
+        )
+        
+        if result['success']:
+            return jsonify(result), 201
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Create campaign lead error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaign-leads/<campaign_lead_id>', methods=['GET'])
+def get_campaign_lead(campaign_lead_id):
+    """Get campaign lead by ID"""
+    try:
+        result = campaign_manager.get_campaign_lead(campaign_lead_id)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Get campaign lead error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaign-leads/<campaign_lead_id>', methods=['PUT'])
+def update_campaign_lead(campaign_lead_id):
+    """Update campaign lead"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No data provided'
+            }), 400
+        
+        result = campaign_manager.update_campaign_lead(campaign_lead_id, data)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Update campaign lead error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaign-leads/<campaign_lead_id>', methods=['DELETE'])
+def delete_campaign_lead(campaign_lead_id):
+    """Delete campaign lead"""
+    try:
+        result = campaign_manager.delete_campaign_lead(campaign_lead_id)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Delete campaign lead error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaign-leads/campaigns/<campaign_id>', methods=['GET'])
+def get_campaign_leads_by_campaign(campaign_id):
+    """Get all campaign leads for a campaign"""
+    try:
+        status = request.args.get('status')
+        result = campaign_manager.get_campaign_leads_by_campaign(campaign_id, status)
+        
+        return jsonify(result), 200
+            
+    except Exception as e:
+        logger.error(f"Get campaign leads by campaign error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaign-leads/queries/<query_id>', methods=['GET'])
+def get_campaign_leads_by_query(query_id):
+    """Get all campaign leads for a query"""
+    try:
+        result = campaign_manager.get_campaign_leads_by_query(query_id)
+        
+        return jsonify(result), 200
+            
+    except Exception as e:
+        logger.error(f"Get campaign leads by query error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/campaign-leads/bulk', methods=['POST'])
+def bulk_create_campaign_leads():
+    """Create multiple campaign leads for a campaign"""
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No data provided'
+            }), 400
+        
+        # Required fields
+        campaign_id = data.get('campaign_id')
+        query_ids = data.get('query_ids')
+        
+        if not all([campaign_id, query_ids]):
+            return jsonify({
+                'success': False,
+                'message': 'campaign_id and query_ids are required'
+            }), 400
+        
+        if not isinstance(query_ids, list) or len(query_ids) == 0:
+            return jsonify({
+                'success': False,
+                'message': 'query_ids must be a non-empty list'
+            }), 400
+        
+        # Optional fields
+        status = data.get('status', 'queued')
+        scheduled_at = data.get('scheduled_at')
+        
+        result = campaign_manager.bulk_create_campaign_leads(
+            campaign_id=campaign_id,
+            query_ids=query_ids,
+            status=status,
+            scheduled_at=scheduled_at
+        )
+        
+        if result['success']:
+            return jsonify(result), 201
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Bulk create campaign leads error: {str(e)}")
         return jsonify({
             'success': False,
             'message': 'Internal server error'
