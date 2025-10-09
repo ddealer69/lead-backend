@@ -8,7 +8,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from db_utils import DatabaseManager
 from company_utils import CompanyManager
-from campaign_utils import CampaignManager
+from campaign_utils import CampaignManager, EmailDeliveryLogsManager
 from smtp_utils import SMTPManager
 from social_utils import SocialManager
 from search_utils import SearchManager
@@ -27,6 +27,7 @@ CORS(app)  # Enable CORS for all routes
 user_manager = DatabaseManager()
 company_manager = CompanyManager()
 campaign_manager = CampaignManager()
+email_delivery_manager = EmailDeliveryLogsManager()
 smtp_manager = SMTPManager()
 social_manager = SocialManager()
 search_manager = SearchManager()
@@ -1975,6 +1976,141 @@ def bulk_create_campaign_leads():
             
     except Exception as e:
         logger.error(f"Bulk create campaign leads error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+# ============================================================================
+# CAMPAIGN LEADS BY COMPANY ROUTES
+# ============================================================================
+
+@app.route('/api/campaign-leads/companies/<company_id>', methods=['GET'])
+def get_campaign_leads_by_company(company_id):
+    """Get all campaign leads for a company"""
+    try:
+        status = request.args.get('status')
+        result = campaign_manager.get_campaign_leads_by_company(company_id, status)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Get campaign leads by company error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+# ============================================================================
+# EMAIL DELIVERY LOGS ROUTES
+# ============================================================================
+
+@app.route('/api/email-delivery-logs', methods=['POST'])
+def create_email_delivery_log():
+    """Create new email delivery log"""
+    try:
+        data = request.get_json()
+        
+        # Optional fields
+        campaign_lead_id = data.get('campaign_lead_id')
+        campaign_id = data.get('campaign_id')
+        smtp_credential_id = data.get('smtp_credential_id')
+        recipient = data.get('recipient')
+        event_type = data.get('event_type', 'delivered')
+        provider_event = data.get('provider_event')
+        
+        result = email_delivery_manager.create_email_delivery_log(
+            campaign_lead_id=campaign_lead_id,
+            campaign_id=campaign_id,
+            smtp_credential_id=smtp_credential_id,
+            recipient=recipient,
+            event_type=event_type,
+            provider_event=provider_event
+        )
+        
+        if result['success']:
+            return jsonify(result), 201
+        else:
+            return jsonify(result), 400
+            
+    except Exception as e:
+        logger.error(f"Create email delivery log error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/email-delivery-logs/<log_id>', methods=['GET'])
+def get_email_delivery_log(log_id):
+    """Get email delivery log by ID"""
+    try:
+        result = email_delivery_manager.get_delivery_log(log_id)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Get email delivery log error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/email-delivery-logs/<log_id>', methods=['DELETE'])
+def delete_email_delivery_log(log_id):
+    """Delete email delivery log"""
+    try:
+        result = email_delivery_manager.delete_delivery_log(log_id)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Delete email delivery log error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/email-delivery-logs/campaigns/<campaign_id>', methods=['GET'])
+def get_delivery_logs_by_campaign(campaign_id):
+    """Get all delivery logs for a campaign"""
+    try:
+        event_type = request.args.get('event_type')
+        result = email_delivery_manager.get_delivery_logs_by_campaign(campaign_id, event_type)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Get delivery logs by campaign error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error'
+        }), 500
+
+@app.route('/api/email-delivery-logs/campaign-leads/<campaign_lead_id>', methods=['GET'])
+def get_delivery_logs_by_campaign_lead(campaign_lead_id):
+    """Get all delivery logs for a campaign lead"""
+    try:
+        result = email_delivery_manager.get_delivery_logs_by_campaign_lead(campaign_lead_id)
+        
+        if result['success']:
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 404
+            
+    except Exception as e:
+        logger.error(f"Get delivery logs by campaign lead error: {str(e)}")
         return jsonify({
             'success': False,
             'message': 'Internal server error'

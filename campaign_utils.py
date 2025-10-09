@@ -49,12 +49,46 @@ class CampaignManager:
             return False
     
     def verify_query_exists(self, query_id: str) -> bool:
-        """Verify that the query exists"""
+        """Verify that the lead exists (query_id refers to lead id)"""
         try:
-            result = self.supabase.table('queries').select('id').eq('id', query_id).execute()
+            result = self.supabase.table('leads').select('id').eq('id', query_id).execute()
             return len(result.data) > 0
         except Exception:
             return False
+    
+    def get_lead_details(self, lead_id: str) -> Dict[str, Any]:
+        """
+        Get lead details for personalization variables
+        Returns: {'success': bool, 'data': dict or None}
+        """
+        try:
+            result = self.supabase.table('leads').select(
+                'id, source_link, full_name, source_name, title, company_name'
+            ).eq('id', lead_id).execute()
+            
+            if result.data:
+                lead_data = result.data[0]
+                personalization_vars = {
+                    'source_link': lead_data.get('source_link'),
+                    'full_name': lead_data.get('full_name'),
+                    'source_name': lead_data.get('source_name'),
+                    'title': lead_data.get('title'),
+                    'company_name': lead_data.get('company_name')
+                }
+                return {
+                    'success': True,
+                    'data': personalization_vars
+                }
+            else:
+                return {
+                    'success': False,
+                    'data': None
+                }
+        except Exception:
+            return {
+                'success': False,
+                'data': None
+            }
     
     # ===================== CAMPAIGNS CRUD OPERATIONS =====================
     
@@ -403,11 +437,11 @@ class CampaignManager:
                     'campaign_lead': None
                 }
             
-            # Verify query exists
+            # Verify lead exists (query_id refers to lead id)
             if not self.verify_query_exists(query_id):
                 return {
                     'success': False,
-                    'message': 'Query not found',
+                    'message': 'Lead not found',
                     'campaign_lead': None
                 }
             
@@ -428,6 +462,14 @@ class CampaignManager:
                     'message': 'Campaign lead already exists for this campaign and query combination',
                     'campaign_lead': None
                 }
+            
+            # Get personalization variables from lead data if not provided
+            if personalization_vars is None:
+                lead_details = self.get_lead_details(query_id)
+                if lead_details['success']:
+                    personalization_vars = lead_details['data']
+                else:
+                    personalization_vars = {}
             
             # Create campaign lead data
             campaign_lead_data = {
@@ -662,6 +704,66 @@ class CampaignManager:
                 'campaign_leads': []
             }
     
+    def get_campaign_leads_by_company(self, company_id: str, status: str = None) -> Dict[str, Any]:
+        """
+        Get all campaign leads for a company (through campaigns)
+        Returns: {'success': bool, 'message': str, 'campaign_leads': list}
+        """
+        try:
+            # Verify company exists
+            if not self.verify_company_exists(company_id):
+                return {
+                    'success': False,
+                    'message': 'Company not found or inactive',
+                    'campaign_leads': []
+                }
+            
+            # Get all campaigns for this company
+            campaigns_result = self.get_campaigns_by_company(company_id)
+            if not campaigns_result['success']:
+                return {
+                    'success': False,
+                    'message': campaigns_result['message'],
+                    'campaign_leads': []
+                }
+            
+            campaign_ids = [campaign['id'] for campaign in campaigns_result['campaigns']]
+            
+            if not campaign_ids:
+                return {
+                    'success': True,
+                    'message': 'No campaigns found for this company',
+                    'campaign_leads': []
+                }
+            
+            # Build query for campaign leads
+            query_builder = self.supabase.table('campaign_leads').select('*').in_('campaign_id', campaign_ids)
+            
+            if status:
+                valid_statuses = ['queued', 'sent', 'failed', 'bounced', 'opened', 'clicked', 'scheduled']
+                if status not in valid_statuses:
+                    return {
+                        'success': False,
+                        'message': f'Invalid status filter. Must be one of: {", ".join(valid_statuses)}',
+                        'campaign_leads': []
+                    }
+                query_builder = query_builder.eq('status', status)
+            
+            result = query_builder.order('created_at', desc=True).execute()
+            
+            return {
+                'success': True,
+                'message': f'Retrieved {len(result.data)} campaign leads',
+                'campaign_leads': result.data
+            }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error retrieving campaign leads: {str(e)}',
+                'campaign_leads': []
+            }
+    
     # ===================== BULK OPERATIONS =====================
     
     def bulk_create_campaign_leads(self, campaign_id: str, query_ids: List[str],
@@ -809,4 +911,186 @@ class CampaignManager:
                 'success': False,
                 'message': f'Error retrieving campaign statistics: {str(e)}',
                 'stats': {}
+            }
+
+
+class EmailDeliveryLogsManager:
+    def __init__(self):
+        """Initialize Supabase client"""
+        self.supabase_url = os.getenv('SUPABASE_URL')
+        self.supabase_key = os.getenv('SUPABASE_SERVICE_ROLE_KEY')
+        
+        if not self.supabase_url or not self.supabase_key:
+            raise ValueError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in environment")
+        
+        self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+    
+    def create_email_delivery_log(self, campaign_lead_id: str = None, campaign_id: str = None,
+                                smtp_credential_id: str = None, recipient: str = None,
+                                event_type: str = 'delivered', provider_event: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Create new email delivery log
+        Returns: {'success': bool, 'message': str, 'log': dict or None}
+        """
+        try:
+            # Validate event_type
+            valid_event_types = ['delivered', 'bounced', 'open', 'click', 'complaint']
+            if event_type not in valid_event_types:
+                return {
+                    'success': False,
+                    'message': f'Invalid event_type. Must be one of: {", ".join(valid_event_types)}',
+                    'log': None
+                }
+            
+            # Set default provider_event if not provided
+            if provider_event is None:
+                provider_event = {"admin": "system_generated"}
+            
+            # Create log data
+            log_data = {
+                'campaign_lead_id': campaign_lead_id,
+                'campaign_id': campaign_id,
+                'smtp_credential_id': smtp_credential_id,
+                'recipient': recipient,
+                'event_type': event_type,
+                'provider_event': provider_event,
+                'occurred_at': datetime.now(timezone.utc).isoformat()
+            }
+            
+            result = self.supabase.table('email_delivery_logs').insert(log_data).execute()
+            
+            if result.data:
+                return {
+                    'success': True,
+                    'message': 'Email delivery log created successfully',
+                    'log': result.data[0]
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': 'Failed to create email delivery log',
+                    'log': None
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error creating email delivery log: {str(e)}',
+                'log': None
+            }
+    
+    def get_delivery_logs_by_campaign(self, campaign_id: str, event_type: str = None) -> Dict[str, Any]:
+        """
+        Get all delivery logs for a campaign
+        Returns: {'success': bool, 'message': str, 'logs': list}
+        """
+        try:
+            query_builder = self.supabase.table('email_delivery_logs').select('*').eq('campaign_id', campaign_id)
+            
+            if event_type:
+                valid_event_types = ['delivered', 'bounced', 'open', 'click', 'complaint']
+                if event_type not in valid_event_types:
+                    return {
+                        'success': False,
+                        'message': f'Invalid event_type filter. Must be one of: {", ".join(valid_event_types)}',
+                        'logs': []
+                    }
+                query_builder = query_builder.eq('event_type', event_type)
+            
+            result = query_builder.order('occurred_at', desc=True).execute()
+            
+            return {
+                'success': True,
+                'message': f'Retrieved {len(result.data)} delivery logs',
+                'logs': result.data
+            }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error retrieving delivery logs: {str(e)}',
+                'logs': []
+            }
+    
+    def get_delivery_logs_by_campaign_lead(self, campaign_lead_id: str) -> Dict[str, Any]:
+        """
+        Get all delivery logs for a campaign lead
+        Returns: {'success': bool, 'message': str, 'logs': list}
+        """
+        try:
+            result = self.supabase.table('email_delivery_logs').select('*').eq('campaign_lead_id', campaign_lead_id).order('occurred_at', desc=True).execute()
+            
+            return {
+                'success': True,
+                'message': f'Retrieved {len(result.data)} delivery logs',
+                'logs': result.data
+            }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error retrieving delivery logs: {str(e)}',
+                'logs': []
+            }
+    
+    def get_delivery_log(self, log_id: str) -> Dict[str, Any]:
+        """
+        Get delivery log by ID
+        Returns: {'success': bool, 'message': str, 'log': dict or None}
+        """
+        try:
+            result = self.supabase.table('email_delivery_logs').select('*').eq('id', log_id).execute()
+            
+            if result.data:
+                return {
+                    'success': True,
+                    'message': 'Delivery log retrieved successfully',
+                    'log': result.data[0]
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': 'Delivery log not found',
+                    'log': None
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error retrieving delivery log: {str(e)}',
+                'log': None
+            }
+    
+    def delete_delivery_log(self, log_id: str) -> Dict[str, Any]:
+        """
+        Delete delivery log
+        Returns: {'success': bool, 'message': str}
+        """
+        try:
+            # Verify log exists
+            existing = self.get_delivery_log(log_id)
+            if not existing['success']:
+                return {
+                    'success': False,
+                    'message': 'Delivery log not found'
+                }
+            
+            # Delete log
+            result = self.supabase.table('email_delivery_logs').delete().eq('id', log_id).execute()
+            
+            if result.data:
+                return {
+                    'success': True,
+                    'message': 'Delivery log deleted successfully'
+                }
+            else:
+                return {
+                    'success': False,
+                    'message': 'Failed to delete delivery log'
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'message': f'Error deleting delivery log: {str(e)}'
             }
