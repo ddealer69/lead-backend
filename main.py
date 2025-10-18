@@ -128,6 +128,63 @@ def login():
             'success': False,
             'message': 'Internal server error'
         }), 500
+from flask import Flask, request, render_template, jsonify
+import smtplib
+import random
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SENDER_EMAIL = "prathamdesai071204@gmail.com"
+SENDER_PASSWORD = "rgbv bsfh pjbn mgnv"  # Gmail App Password
+
+
+def send_otp_email(receiver_email, otp):
+    """Send OTP email using SMTP."""
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = SENDER_EMAIL
+        msg["To"] = receiver_email
+        msg["Subject"] = "Your OTP Verification Code"
+
+        body = f"Your One-Time Password (OTP) is: {otp}\nThis code is valid for 5 minutes."
+        msg.attach(MIMEText(body, "plain"))
+
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        return False
+
+
+@app.route("/auth/otp", methods=["POST"])
+def send_otp():
+    """Endpoint to generate and send OTP to email."""
+    data = request.get_json()
+    email = data.get("email")
+
+    if not email:
+        return jsonify({"error": "Email is required"}), 400
+
+    # Generate a 6-digit OTP
+    otp = random.randint(100000, 999999)
+
+    # Send email
+    success = send_otp_email(email, otp)
+    if not success:
+        return jsonify({"error": "Failed to send OTP"}), 500
+
+    # Render template and pass OTP to frontend
+    return jsonify({
+        'success': True,
+        'otp': otp
+    })
+
 
 @app.route('/auth/signup', methods=['POST'])
 def signup():
