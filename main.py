@@ -4,11 +4,9 @@ Provides endpoints for user authentication, registration, and account management
 """
 
 import os
-import re
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from email.utils import formataddr
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from db_utils import DatabaseManager
@@ -24,6 +22,39 @@ import logging
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def send_email_direct_smtp(smtp_config, recipient_email, subject, body):
+    """Send email using direct SMTP approach (similar to OTP sending method)."""
+    try:
+        # Create message
+        msg = MIMEMultipart()
+        msg["From"] = smtp_config['username']
+        msg["To"] = recipient_email
+        msg["Subject"] = subject
+
+        # Attach body (support both HTML and plain text)
+        if body.strip().startswith('<!DOCTYPE') or body.strip().startswith('<html'):
+            msg.attach(MIMEText(body, "html"))
+        else:
+            msg.attach(MIMEText(body, "plain"))
+
+        # Connect to SMTP server
+        server = smtplib.SMTP(smtp_config['smtp_host'], smtp_config['smtp_port'])
+        server.starttls()  # Enable encryption
+        
+        # Login using decrypted password
+        server.login(smtp_config['username'], smtp_config['password'])
+        
+        # Send message
+        server.send_message(msg)
+        server.quit()
+        
+        logger.info(f"Direct SMTP: Email sent successfully to {recipient_email}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Direct SMTP error sending to {recipient_email}: {str(e)}")
+        return False
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -2158,6 +2189,240 @@ def send_campaign_emails(campaign_id):
         }), 500
 
 # ============================================================================
+# DEBUG ENDPOINT FOR SMTP CREDENTIALS
+# ============================================================================
+
+@app.route('/api/campaigns/<campaign_id>/debug-smtp', methods=['GET'])
+def debug_smtp_config(campaign_id):
+    """Debug endpoint to check SMTP configuration for a campaign"""
+    try:
+        # Get campaign details
+        campaign_result = campaign_manager.get_campaign(campaign_id)
+        if not campaign_result['success']:
+            return jsonify({
+                'success': False,
+                'message': 'Campaign not found'
+            }), 404
+        
+        campaign = campaign_result['campaign']
+        smtp_credential_id = campaign.get('smtp_credential_id')
+        
+        if not smtp_credential_id:
+            return jsonify({
+                'success': False,
+                'message': 'Campaign does not have SMTP credentials configured'
+            }), 400
+        
+        # Get SMTP credentials (with password for debugging)
+        smtp_result = smtp_manager.get_smtp_credentials(smtp_credential_id, include_password=True)
+        if not smtp_result['success']:
+            return jsonify({
+                'success': False,
+                'message': 'SMTP credentials not found'
+            }), 404
+        
+        smtp_config = smtp_result['smtp_credentials']
+        
+        return jsonify({
+            'success': True,
+            'message': 'SMTP configuration retrieved',
+            'smtp_config': {
+                'smtp_host': smtp_config.get('smtp_host'),
+                'smtp_port': smtp_config.get('smtp_port'),
+                'username': smtp_config.get('username'),
+                'password': smtp_config.get('password', 'NOT_FOUND'),  # Show decrypted password
+                'auth_type': smtp_config.get('auth_type'),
+                'display_name': smtp_config.get('display_name')
+            },
+            'campaign_info': {
+                'campaign_id': campaign_id,
+                'campaign_name': campaign.get('name'),
+                'subject_template': campaign.get('subject_template'),
+                'body_template': campaign.get('body_template', '')[:100] + '...' if campaign.get('body_template') else None
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Debug SMTP config error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Debug error: {str(e)}'
+        }), 500
+
+# ============================================================================
+# CUSTOM EMAIL SENDING ENDPOINT
+# ============================================================================
+
+@app.route('/api/campaigns/<campaign_id>/send-custom-emails', methods=['POST'])
+def send_custom_emails(campaign_id):
+    """
+    Send personalized emails to a custom list using campaign templates and SMTP settings
+    Expected JSON: {
+        "recipients": [
+            {
+                "email": "john@example.com",
+                "full_name": "John Doe"
+            },
+            {
+                "email": "jane@example.com", 
+                "full_name": "Jane Smith"
+            }
+        ]
+    }
+    """
+    try:
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({
+                'success': False,
+                'message': 'No JSON data provided'
+            }), 400
+        
+        recipients = data.get('recipients', [])
+        
+        if not recipients or not isinstance(recipients, list):
+            return jsonify({
+                'success': False,
+                'message': 'Recipients list is required and must be an array'
+            }), 400
+        
+        # Validate recipients format
+        for recipient in recipients:
+            if not isinstance(recipient, dict) or 'email' not in recipient or 'full_name' not in recipient:
+                return jsonify({
+                    'success': False,
+                    'message': 'Each recipient must have email and full_name fields'
+                }), 400
+        
+        # Get campaign details including templates and SMTP ID
+        campaign_result = campaign_manager.get_campaign(campaign_id)
+        if not campaign_result['success']:
+            return jsonify({
+                'success': False,
+                'message': 'Campaign not found'
+            }), 404
+        
+        campaign = campaign_result['campaign']
+        smtp_credential_id = campaign.get('smtp_credential_id')
+        subject_template = campaign.get('subject_template', '')
+        body_template = campaign.get('body_template', '')
+        
+        if not smtp_credential_id:
+            return jsonify({
+                'success': False,
+                'message': 'Campaign does not have SMTP credentials configured'
+            }), 400
+        
+        if not subject_template or not body_template:
+            return jsonify({
+                'success': False,
+                'message': 'Campaign does not have email templates configured'
+            }), 400
+        
+        # Get SMTP credentials (with password for sending)
+        smtp_result = smtp_manager.get_smtp_credentials(smtp_credential_id, include_password=True)
+        if not smtp_result['success']:
+            return jsonify({
+                'success': False,
+                'message': 'SMTP credentials not found'
+            }), 404
+        
+        smtp_config = smtp_result['smtp_credentials']
+        
+        # Debug: Print SMTP configuration (including decrypted password)
+        logger.info(f"=== SMTP CONFIG DEBUG ===")
+        logger.info(f"Host: {smtp_config.get('smtp_host')}")
+        logger.info(f"Port: {smtp_config.get('smtp_port')}")
+        logger.info(f"Username: {smtp_config.get('username')}")
+        logger.info(f"Password: {smtp_config.get('password')}")  # This will show the decrypted password
+        logger.info(f"Auth Type: {smtp_config.get('auth_type')}")
+        logger.info(f"========================")
+        
+        # Prepare results tracking
+        emails_sent = 0
+        emails_failed = 0
+        results = []
+        
+        # Send email to each recipient
+        for recipient in recipients:
+            try:
+                email = recipient['email'].strip()
+                full_name = recipient['full_name'].strip()
+                
+                # Simple template personalization (like your OTP method)
+                personalized_subject = subject_template.replace('{full_name}', full_name)
+                personalized_subject = personalized_subject.replace('{email}', email)
+                
+                personalized_body = body_template.replace('{full_name}', full_name)
+                personalized_body = personalized_body.replace('{email}', email)
+                
+                logger.info(f"Sending email to: {email}")
+                logger.info(f"Subject: {personalized_subject}")
+                logger.info(f"Body preview: {personalized_body[:100]}...")
+                
+                # Send email using direct SMTP approach (like your OTP method)
+                success = send_email_direct_smtp(
+                    smtp_config=smtp_config,
+                    recipient_email=email,
+                    subject=personalized_subject,
+                    body=personalized_body
+                )
+                
+                if success:
+                    emails_sent += 1
+                    results.append({
+                        'email': email,
+                        'full_name': full_name,
+                        'status': 'sent',
+                        'subject': personalized_subject,
+                        'message': 'Email sent successfully'
+                    })
+                    logger.info(f"✅ Custom email sent successfully to: {email}")
+                else:
+                    emails_failed += 1
+                    results.append({
+                        'email': email,
+                        'full_name': full_name,
+                        'status': 'failed',
+                        'subject': personalized_subject,
+                        'error': 'SMTP sending failed - check logs for details'
+                    })
+                    logger.error(f"❌ Failed to send custom email to: {email}")
+                    
+            except Exception as recipient_error:
+                emails_failed += 1
+                results.append({
+                    'email': recipient.get('email', 'unknown'),
+                    'full_name': recipient.get('full_name', 'unknown'),
+                    'status': 'failed',
+                    'subject': subject_template,
+                    'error': f'Error processing recipient: {str(recipient_error)}'
+                })
+                logger.error(f"Exception processing recipient {recipient.get('email', 'unknown')}: {str(recipient_error)}")
+        
+        # Return comprehensive results
+        return jsonify({
+            'success': True,
+            'message': f'Custom email sending completed. {emails_sent} sent, {emails_failed} failed',
+            'campaign_id': campaign_id,
+            'emails_sent': emails_sent,
+            'emails_failed': emails_failed,
+            'total_recipients': len(recipients),
+            'results': results
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Send custom emails error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': 'Internal server error',
+            'emails_sent': 0,
+            'emails_failed': 0,
+            'results': []
+        }), 500
+
+# ============================================================================
 # ERROR HANDLERS
 # ============================================================================
 
@@ -2174,361 +2439,6 @@ def method_not_allowed(error):
         'success': False,
         'message': 'Method not allowed'
     }), 405
-
-# ===================== DIRECT EMAIL SENDING ENDPOINTS =====================
-
-@app.route('/api/email/send-direct', methods=['POST'])
-def send_direct_emails():
-    """
-    Send emails directly to multiple recipients using provided SMTP credentials
-    Expected JSON: {
-        "smtp_host": "smtp.gmail.com",
-        "smtp_port": 587,
-        "smtp_email": "sender@gmail.com",
-        "smtp_password": "app_password_here",
-        "recipients": ["email1@example.com", "email2@example.com"],
-        "full_names": ["John Doe", "Jane Smith"], // optional, same order as recipients
-        "subject": "Hello {{full_name}}, welcome to our service",
-        "body": "Email body content here (supports HTML and {{full_name}} placeholder)",
-        "sender_name": "Company Name" // optional, defaults to email
-    }
-    """
-    try:
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({
-                'success': False,
-                'message': 'No JSON data provided',
-                'results': []
-            }), 400
-        
-        # Extract required fields
-        smtp_host = data.get('smtp_host', '').strip()
-        smtp_port = data.get('smtp_port')
-        smtp_email = data.get('smtp_email', '').strip()
-        smtp_password = data.get('smtp_password', '')
-        recipients = data.get('recipients', [])
-        subject = data.get('subject', '').strip()
-        body = data.get('body', '').strip()
-        
-        # Extract optional fields
-        full_names = data.get('full_names', [])
-        sender_name = data.get('sender_name', smtp_email).strip()
-        
-        # Validation
-        if not all([smtp_host, smtp_port, smtp_email, smtp_password, recipients, subject, body]):
-            return jsonify({
-                'success': False,
-                'message': 'smtp_host, smtp_port, smtp_email, smtp_password, recipients, subject, and body are required',
-                'results': []
-            }), 400
-        
-        if not isinstance(recipients, list) or len(recipients) == 0:
-            return jsonify({
-                'success': False,
-                'message': 'Recipients must be a non-empty array of email addresses',
-                'results': []
-            }), 400
-        
-        # Validate full_names if provided
-        if full_names:
-            if not isinstance(full_names, list):
-                return jsonify({
-                    'success': False,
-                    'message': 'full_names must be a list',
-                    'results': []
-                }), 400
-            
-            if len(full_names) != len(recipients):
-                return jsonify({
-                    'success': False,
-                    'message': f'full_names length ({len(full_names)}) must match recipients length ({len(recipients)})',
-                    'results': []
-                }), 400
-        
-        # Validate email format for sender
-        import re
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, smtp_email):
-            return jsonify({
-                'success': False,
-                'message': 'Invalid sender email format',
-                'results': []
-            }), 400
-        
-        # Validate all recipient emails
-        invalid_recipients = []
-        valid_recipients = []
-        
-        for recipient in recipients:
-            recipient = recipient.strip()
-            if re.match(email_pattern, recipient):
-                valid_recipients.append(recipient)
-            else:
-                invalid_recipients.append(recipient)
-        
-        if invalid_recipients:
-            return jsonify({
-                'success': False,
-                'message': f'Invalid recipient email format: {", ".join(invalid_recipients)}',
-                'results': []
-            }), 400
-        
-        # Create SMTP configuration
-        smtp_config = {
-            'smtp_host': smtp_host,
-            'smtp_port': smtp_port,
-            'username': smtp_email,
-            'password': smtp_password
-        }
-        
-        # Send emails to all recipients
-        results = []
-        emails_sent = 0
-        emails_failed = 0
-        
-        logger.info(f"Starting direct email sending to {len(valid_recipients)} recipients")
-        
-        for index, recipient in enumerate(valid_recipients):
-            try:
-                # Get corresponding full name if provided
-                current_full_name = full_names[index] if full_names and index < len(full_names) else "there"
-                
-                # Personalize subject and body by replacing {{full_name}} placeholder
-                personalized_subject = subject.replace('{{full_name}}', current_full_name)
-                personalized_body = body.replace('{{full_name}}', current_full_name)
-                
-                # Send email directly using smtplib with plain text password
-                import smtplib
-                from email.mime.text import MIMEText
-                from email.mime.multipart import MIMEMultipart
-                from email.utils import formataddr
-                
-                # Create email message
-                msg = MIMEMultipart('alternative')
-                msg['Subject'] = personalized_subject
-                msg['From'] = formataddr((sender_name, smtp_email))
-                msg['To'] = recipient
-                
-                # Add HTML body
-                html_part = MIMEText(personalized_body, 'html')
-                msg.attach(html_part)
-                
-                # Send email based on port type
-                if smtp_port == 465:
-                    # SSL connection
-                    with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
-                        server.login(smtp_email, smtp_password)
-                        server.send_message(msg)
-                else:
-                    # TLS or Plain connection
-                    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
-                        server.ehlo()
-                        if smtp_port == 587:
-                            server.starttls()
-                            server.ehlo()
-                        server.login(smtp_email, smtp_password)
-                        server.send_message(msg)
-                
-                emails_sent += 1
-                results.append({
-                    'recipient': recipient,
-                    'full_name': current_full_name,
-                    'status': 'sent',
-                    'message': 'Email sent successfully'
-                })
-                logger.info(f"Email sent successfully to {recipient} ({current_full_name})")
-                    
-            except smtplib.SMTPAuthenticationError as e:
-                emails_failed += 1
-                error_message = 'SMTP authentication failed. Please check your email and password/app password.'
-                results.append({
-                    'recipient': recipient,
-                    'full_name': current_full_name,
-                    'status': 'failed',
-                    'message': error_message
-                })
-                logger.error(f"SMTP Authentication error for {recipient} ({current_full_name}): {str(e)}")
-                
-            except smtplib.SMTPRecipientsRefused as e:
-                emails_failed += 1
-                error_message = f'Recipient {recipient} was refused by the server'
-                results.append({
-                    'recipient': recipient,
-                    'full_name': current_full_name,
-                    'status': 'failed',
-                    'message': error_message
-                })
-                logger.error(f"SMTP Recipients refused for {recipient} ({current_full_name}): {str(e)}")
-                
-            except smtplib.SMTPConnectError as e:
-                emails_failed += 1
-                error_message = f'Could not connect to SMTP server {smtp_host}:{smtp_port}'
-                results.append({
-                    'recipient': recipient,
-                    'full_name': current_full_name,
-                    'status': 'failed',
-                    'message': error_message
-                })
-                logger.error(f"SMTP Connect error for {recipient} ({current_full_name}): {str(e)}")
-                
-            except Exception as e:
-                emails_failed += 1
-                error_message = f'Error sending email: {str(e)}'
-                results.append({
-                    'recipient': recipient,
-                    'full_name': current_full_name,
-                    'status': 'failed',
-                    'message': error_message
-                })
-                logger.error(f"Exception sending email to {recipient} ({current_full_name}): {error_message}")
-        
-        # Determine overall success
-        overall_success = emails_sent > 0
-        
-        # Create response
-        response = {
-            'success': overall_success,
-            'message': f'Email sending completed. Sent: {emails_sent}, Failed: {emails_failed}',
-            'emails_sent': emails_sent,
-            'emails_failed': emails_failed,
-            'total_recipients': len(valid_recipients),
-            'results': results
-        }
-        
-        # Determine HTTP status code
-        if emails_failed > 0 and emails_sent == 0:
-            # All failed
-            status_code = 400
-        elif emails_failed > 0:
-            # Partial success
-            status_code = 207  # Multi-status
-        else:
-            # All successful
-            status_code = 200
-            
-        return jsonify(response), status_code
-        
-    except Exception as e:
-        logger.error(f"Direct email sending error: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'Internal server error: {str(e)}',
-            'emails_sent': 0,
-            'emails_failed': 0,
-            'results': []
-        }), 500
-
-@app.route('/api/email/test-smtp', methods=['POST'])
-def test_smtp_connection():
-    """
-    Test SMTP connection without sending emails
-    Expected JSON: {
-        "smtp_host": "smtp.gmail.com",
-        "smtp_port": 587,
-        "smtp_email": "sender@gmail.com",
-        "smtp_password": "app_password_here"
-    }
-    """
-    try:
-        data = request.get_json()
-        
-        if not data:
-            return jsonify({
-                'success': False,
-                'message': 'No JSON data provided'
-            }), 400
-        
-        # Extract required fields
-        smtp_host = data.get('smtp_host', '').strip()
-        smtp_port = data.get('smtp_port')
-        smtp_email = data.get('smtp_email', '').strip()
-        smtp_password = data.get('smtp_password', '')
-        
-        # Validation
-        if not all([smtp_host, smtp_port, smtp_email, smtp_password]):
-            return jsonify({
-                'success': False,
-                'message': 'smtp_host, smtp_port, smtp_email, and smtp_password are required'
-            }), 400
-        
-        # Validate email format
-        import re
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, smtp_email):
-            return jsonify({
-                'success': False,
-                'message': 'Invalid email format'
-            }), 400
-        
-        # Test SMTP connection
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-        
-        try:
-            # Determine connection type based on port
-            if smtp_port == 465:
-                # SSL connection
-                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as server:
-                    server.login(smtp_email, smtp_password)
-                    connection_type = "SSL"
-            else:
-                # TLS or Plain connection
-                with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
-                    server.ehlo()
-                    if smtp_port == 587:
-                        server.starttls()
-                        server.ehlo()
-                        connection_type = "TLS"
-                    else:
-                        connection_type = "Plain"
-                    server.login(smtp_email, smtp_password)
-            
-            logger.info(f"SMTP connection test successful for {smtp_email}")
-            
-            return jsonify({
-                'success': True,
-                'message': f'SMTP connection successful using {connection_type} connection',
-                'connection_details': {
-                    'host': smtp_host,
-                    'port': smtp_port,
-                    'email': smtp_email,
-                    'connection_type': connection_type
-                }
-            }), 200
-            
-        except smtplib.SMTPAuthenticationError:
-            return jsonify({
-                'success': False,
-                'message': 'SMTP authentication failed. Please check your email and password/app password.'
-            }), 401
-            
-        except smtplib.SMTPConnectError:
-            return jsonify({
-                'success': False,
-                'message': f'Could not connect to SMTP server {smtp_host}:{smtp_port}'
-            }), 400
-            
-        except smtplib.SMTPServerDisconnected:
-            return jsonify({
-                'success': False,
-                'message': 'SMTP server disconnected unexpectedly'
-            }), 400
-            
-        except Exception as smtp_error:
-            return jsonify({
-                'success': False,
-                'message': f'SMTP connection failed: {str(smtp_error)}'
-            }), 400
-            
-    except Exception as e:
-        logger.error(f"Test SMTP connection error: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'Internal server error: {str(e)}'
-        }), 500
 
 @app.errorhandler(500)
 def internal_error(error):

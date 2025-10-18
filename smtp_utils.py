@@ -4,11 +4,12 @@ Handles CRUD operations for SMTP email configurations with encrypted password st
 """
 
 import os
-import hashlib
+import base64
 from typing import Optional, Dict, Any, List
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime
+from cryptography.fernet import Fernet
 
 # Load environment variables
 load_dotenv()
@@ -23,13 +24,46 @@ class SMTPManager:
             raise ValueError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in environment")
         
         self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
+        
+        # Initialize encryption key for passwords
+        encryption_key = os.getenv('PASSWORD_ENCRYPTION_KEY')
+        if not encryption_key:
+            # Generate a key if not exists (for development)
+            encryption_key = Fernet.generate_key().decode()
+            print(f"⚠️  Generated new encryption key: {encryption_key}")
+            print("⚠️  Add this to your .env file as PASSWORD_ENCRYPTION_KEY")
+        
+        self.cipher_suite = Fernet(encryption_key.encode() if isinstance(encryption_key, str) else encryption_key)
     
     def encrypt_password(self, password: str) -> str:
         """
-        Encrypt SMTP password using SHA-256
-        In production, use proper encryption like AES with KMS
+        Encrypt SMTP password using Fernet (AES 128)
+        Returns base64 encoded encrypted password
         """
-        return hashlib.sha256(password.encode()).hexdigest()
+        try:
+            encrypted_password = self.cipher_suite.encrypt(password.encode())
+            return base64.b64encode(encrypted_password).decode()
+        except Exception as e:
+            print(f"Encryption error: {e}")
+            # Fallback to simple base64 for development
+            return base64.b64encode(password.encode()).decode()
+    
+    def decrypt_password(self, encrypted_password: str) -> str:
+        """
+        Decrypt SMTP password using Fernet
+        Returns original password string
+        """
+        try:
+            encrypted_bytes = base64.b64decode(encrypted_password.encode())
+            decrypted_password = self.cipher_suite.decrypt(encrypted_bytes)
+            return decrypted_password.decode()
+        except Exception as e:
+            print(f"Decryption error: {e}")
+            # Fallback to simple base64 decode for development
+            try:
+                return base64.b64decode(encrypted_password.encode()).decode()
+            except:
+                return "DECRYPTION_FAILED"
     
     def verify_account_exists(self, account_id: str) -> bool:
         """Verify that the account exists and is active"""
@@ -157,10 +191,28 @@ class SMTPManager:
                 result = self.supabase.table('smtp_credentials').select(fields).eq('id', smtp_id).execute()
             
             if result.data:
+                smtp_data = result.data[0].copy()
+                
+                # If password is requested, decrypt it and add to response
+                if include_password and 'encrypted_password_ciphertext' in smtp_data:
+                    encrypted_password = smtp_data.get('encrypted_password_ciphertext')
+                    if encrypted_password:
+                        try:
+                            decrypted_password = self.decrypt_password(encrypted_password)
+                            smtp_data['password'] = decrypted_password
+                        except Exception as decrypt_error:
+                            print(f"Password decryption failed: {decrypt_error}")
+                            smtp_data['password'] = "DECRYPTION_FAILED"
+                    else:
+                        smtp_data['password'] = "NO_PASSWORD_STORED"
+                    
+                    # Remove the encrypted field from response
+                    smtp_data.pop('encrypted_password_ciphertext', None)
+                
                 return {
                     'success': True,
                     'message': 'SMTP credentials retrieved successfully',
-                    'smtp_credentials': result.data[0]
+                    'smtp_credentials': smtp_data
                 }
             else:
                 return {
