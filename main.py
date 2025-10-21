@@ -4,9 +4,7 @@ Provides endpoints for user authentication, registration, and account management
 """
 
 import os
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import time
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from db_utils import DatabaseManager
@@ -22,39 +20,6 @@ import logging
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-def send_email_direct_smtp(smtp_config, recipient_email, subject, body):
-    """Send email using direct SMTP approach (similar to OTP sending method)."""
-    try:
-        # Create message
-        msg = MIMEMultipart()
-        msg["From"] = smtp_config['username']
-        msg["To"] = recipient_email
-        msg["Subject"] = subject
-
-        # Attach body (support both HTML and plain text)
-        if body.strip().startswith('<!DOCTYPE') or body.strip().startswith('<html'):
-            msg.attach(MIMEText(body, "html"))
-        else:
-            msg.attach(MIMEText(body, "plain"))
-
-        # Connect to SMTP server
-        server = smtplib.SMTP(smtp_config['smtp_host'], smtp_config['smtp_port'])
-        server.starttls()  # Enable encryption
-        
-        # Login using decrypted password
-        server.login(smtp_config['username'], smtp_config['password'])
-        
-        # Send message
-        server.send_message(msg)
-        server.quit()
-        
-        logger.info(f"Direct SMTP: Email sent successfully to {recipient_email}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Direct SMTP error sending to {recipient_email}: {str(e)}")
-        return False
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -2246,67 +2211,6 @@ def send_campaign_emails(campaign_id):
         }), 500
 
 # ============================================================================
-# DEBUG ENDPOINT FOR SMTP CREDENTIALS
-# ============================================================================
-
-@app.route('/api/campaigns/<campaign_id>/debug-smtp', methods=['GET'])
-def debug_smtp_config(campaign_id):
-    """Debug endpoint to check SMTP configuration for a campaign"""
-    try:
-        # Get campaign details
-        campaign_result = campaign_manager.get_campaign(campaign_id)
-        if not campaign_result['success']:
-            return jsonify({
-                'success': False,
-                'message': 'Campaign not found'
-            }), 404
-        
-        campaign = campaign_result['campaign']
-        smtp_credential_id = campaign.get('smtp_credential_id')
-        
-        if not smtp_credential_id:
-            return jsonify({
-                'success': False,
-                'message': 'Campaign does not have SMTP credentials configured'
-            }), 400
-        
-        # Get SMTP credentials (with password for debugging)
-        smtp_result = smtp_manager.get_smtp_credentials(smtp_credential_id, include_password=True)
-        if not smtp_result['success']:
-            return jsonify({
-                'success': False,
-                'message': 'SMTP credentials not found'
-            }), 404
-        
-        smtp_config = smtp_result['smtp_credentials']
-        
-        return jsonify({
-            'success': True,
-            'message': 'SMTP configuration retrieved',
-            'smtp_config': {
-                'smtp_host': smtp_config.get('smtp_host'),
-                'smtp_port': smtp_config.get('smtp_port'),
-                'username': smtp_config.get('username'),
-                'password': smtp_config.get('password', 'NOT_FOUND'),  # Show decrypted password
-                'auth_type': smtp_config.get('auth_type'),
-                'display_name': smtp_config.get('display_name')
-            },
-            'campaign_info': {
-                'campaign_id': campaign_id,
-                'campaign_name': campaign.get('name'),
-                'subject_template': campaign.get('subject_template'),
-                'body_template': campaign.get('body_template', '')[:100] + '...' if campaign.get('body_template') else None
-            }
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Debug SMTP config error: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': f'Debug error: {str(e)}'
-        }), 500
-
-# ============================================================================
 # CUSTOM EMAIL SENDING ENDPOINT
 # ============================================================================
 
@@ -2387,15 +2291,6 @@ def send_custom_emails(campaign_id):
         
         smtp_config = smtp_result['smtp_credentials']
         
-        # Debug: Print SMTP configuration (including decrypted password)
-        logger.info(f"=== SMTP CONFIG DEBUG ===")
-        logger.info(f"Host: {smtp_config.get('smtp_host')}")
-        logger.info(f"Port: {smtp_config.get('smtp_port')}")
-        logger.info(f"Username: {smtp_config.get('username')}")
-        logger.info(f"Password: {smtp_config.get('password')}")  # This will show the decrypted password
-        logger.info(f"Auth Type: {smtp_config.get('auth_type')}")
-        logger.info(f"========================")
-        
         # Prepare results tracking
         emails_sent = 0
         emails_failed = 0
@@ -2407,56 +2302,53 @@ def send_custom_emails(campaign_id):
                 email = recipient['email'].strip()
                 full_name = recipient['full_name'].strip()
                 
-                # Simple template personalization (like your OTP method)
-                personalized_subject = subject_template.replace('{full_name}', full_name)
-                personalized_subject = personalized_subject.replace('{email}', email)
-                
-                personalized_body = body_template.replace('{full_name}', full_name)
-                personalized_body = personalized_body.replace('{email}', email)
-                
-                logger.info(f"Sending email to: {email}")
-                logger.info(f"Subject: {personalized_subject}")
-                logger.info(f"Body preview: {personalized_body[:100]}...")
-                
-                # Send email using direct SMTP approach (like your OTP method)
-                success = send_email_direct_smtp(
-                    smtp_config=smtp_config,
-                    recipient_email=email,
-                    subject=personalized_subject,
-                    body=personalized_body
+                # Render templates with personalization
+                personalized_subject = email_sender_manager.render_template(
+                    subject_template, 
+                    {'full_name': full_name}
+                )
+                personalized_body = email_sender_manager.render_template(
+                    body_template, 
+                    {'full_name': full_name}
                 )
                 
-                if success:
+                # Send email using SMTP
+                send_result = email_sender_manager.send_email_smtp(
+                    smtp_config=smtp_config,
+                    sender_email=smtp_config['username'],
+                    recipient_email=email,
+                    subject=personalized_subject,
+                    html_content=personalized_body
+                )
+                
+                if send_result['success']:
                     emails_sent += 1
                     results.append({
-                        'email': email,
+                        'recipient': email,
                         'full_name': full_name,
                         'status': 'sent',
-                        'subject': personalized_subject,
                         'message': 'Email sent successfully'
                     })
-                    logger.info(f"✅ Custom email sent successfully to: {email}")
+                    logger.info(f"Custom email sent successfully to: {email}")
                 else:
                     emails_failed += 1
                     results.append({
-                        'email': email,
+                        'recipient': email,
                         'full_name': full_name,
                         'status': 'failed',
-                        'subject': personalized_subject,
-                        'error': 'SMTP sending failed - check logs for details'
+                        'error': send_result['message']
                     })
-                    logger.error(f"❌ Failed to send custom email to: {email}")
+                    logger.error(f"Failed to send custom email to {email}: {send_result['message']}")
                     
             except Exception as recipient_error:
                 emails_failed += 1
                 results.append({
-                    'email': recipient.get('email', 'unknown'),
+                    'recipient': recipient.get('email', 'unknown'),
                     'full_name': recipient.get('full_name', 'unknown'),
                     'status': 'failed',
-                    'subject': subject_template,
                     'error': f'Error processing recipient: {str(recipient_error)}'
                 })
-                logger.error(f"Exception processing recipient {recipient.get('email', 'unknown')}: {str(recipient_error)}")
+                logger.error(f"Error processing recipient {recipient.get('email', 'unknown')}: {str(recipient_error)}")
         
         # Return comprehensive results
         return jsonify({
@@ -2477,6 +2369,200 @@ def send_custom_emails(campaign_id):
             'emails_sent': 0,
             'emails_failed': 0,
             'results': []
+        }), 500
+
+@app.route('/send_direct_campaign_emails', methods=['POST', 'OPTIONS'])
+def send_direct_campaign_emails():
+    """
+    Enhanced batch email sending endpoint with campaign integration:
+    - Uses campaign_id to fetch SMTP credentials and email templates
+    - Batch processing (10 emails per batch with 10-second cooldown)
+    - Template personalization with {variable} and {{variable}} support
+    - Comprehensive error handling and logging
+    - Recipient filtering and validation
+    """
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add('Access-Control-Allow-Headers', "*")
+        response.headers.add('Access-Control-Allow-Methods', "*")
+        return response
+    
+    try:
+        data = request.get_json()
+        
+        # Required parameters
+        if not data or 'campaign_id' not in data or 'recipients' not in data:
+            return jsonify({
+                'success': False,
+                'message': 'Missing required parameters: campaign_id and recipients'
+            }), 400
+        
+        campaign_id = data['campaign_id']
+        recipients = data['recipients']
+        batch_size = data.get('batch_size', 10)
+        cooldown_seconds = data.get('cooldown_seconds', 10)
+        
+        # Validate recipients
+        if not isinstance(recipients, list) or len(recipients) == 0:
+            return jsonify({
+                'success': False,
+                'message': 'Recipients must be a non-empty list'
+            }), 400
+        
+        # Get campaign details
+        campaign_result = campaign_manager.get_campaign(campaign_id)
+        if not campaign_result['success']:
+            return jsonify({
+                'success': False,
+                'message': f'Campaign not found for ID: {campaign_id}'
+            }), 404
+        
+        campaign = campaign_result['campaign']
+        smtp_id = campaign.get('smtp_credential_id')
+        
+        if not smtp_id:
+            return jsonify({
+                'success': False,
+                'message': 'Campaign does not have SMTP credentials configured'
+            }), 400
+        
+        # Get email templates from campaign (with fallbacks from request data)
+        subject = data.get('subject', campaign.get('subject_template', 'Default Subject'))
+        body = data.get('body', campaign.get('body_template', 'Default body content'))
+        is_html = data.get('is_html', False)
+        
+        # Get SMTP credentials with password for email sending
+        smtp_result = smtp_manager.get_smtp_credentials(smtp_id, include_password=True)
+        if not smtp_result['success']:
+            return jsonify({
+                'success': False,
+                'message': f'SMTP configuration not found for ID: {smtp_id}'
+            }), 404
+        
+        smtp_creds = smtp_result['smtp_credentials']
+        
+        # Initialize results tracking
+        results = {
+            'total_recipients': len(recipients),
+            'total_batches': (len(recipients) + batch_size - 1) // batch_size,
+            'successful_sends': 0,
+            'failed_sends': 0,
+            'batch_results': [],
+            'failed_recipients': []
+        }
+        
+        print(f"Starting batch email sending: {results['total_recipients']} recipients in {results['total_batches']} batches")
+        
+        # Process recipients in batches
+        for batch_num in range(0, len(recipients), batch_size):
+            batch_recipients = recipients[batch_num:batch_num + batch_size]
+            batch_index = (batch_num // batch_size) + 1
+            
+            print(f"Processing batch {batch_index}/{results['total_batches']} with {len(batch_recipients)} recipients")
+            
+            batch_result = {
+                'batch_number': batch_index,
+                'recipients_count': len(batch_recipients),
+                'successful': 0,
+                'failed': 0,
+                'errors': []
+            }
+            
+            # Send emails in current batch
+            for recipient in batch_recipients:
+                try:
+                    # Handle recipient format (can be string email or dict with email and data)
+                    if isinstance(recipient, str):
+                        email = recipient
+                        personalization_data = {}
+                    elif isinstance(recipient, dict):
+                        email = recipient.get('email', '')
+                        personalization_data = recipient.get('data', {})
+                    else:
+                        error_msg = f"Invalid recipient format: {recipient}"
+                        batch_result['errors'].append(error_msg)
+                        batch_result['failed'] += 1
+                        results['failed_sends'] += 1
+                        results['failed_recipients'].append(email if 'email' in locals() else str(recipient))
+                        continue
+                    
+                    # Validate email format
+                    if not email or '@' not in email:
+                        error_msg = f"Invalid email address: {email}"
+                        batch_result['errors'].append(error_msg)
+                        batch_result['failed'] += 1
+                        results['failed_sends'] += 1
+                        results['failed_recipients'].append(email)
+                        continue
+                    
+                    # Personalize subject and body
+                    personalized_subject = subject
+                    personalized_body = body
+                    
+                    # Apply personalization with both {variable} and {{variable}} formats
+                    for key, value in personalization_data.items():
+                        personalized_subject = personalized_subject.replace(f'{{{key}}}', str(value))
+                        personalized_subject = personalized_subject.replace(f'{{{{{key}}}}}', str(value))
+                        personalized_body = personalized_body.replace(f'{{{key}}}', str(value))
+                        personalized_body = personalized_body.replace(f'{{{{{key}}}}}', str(value))
+                    
+                    # Send individual email using SMTP configuration
+                    send_result = email_sender_manager.send_email_smtp(
+                        smtp_config=smtp_creds,
+                        sender_email=smtp_creds['username'],
+                        recipient_email=email,
+                        subject=personalized_subject,
+                        html_content=personalized_body if is_html else f"<pre>{personalized_body}</pre>"
+                    )
+                    
+                    if send_result.get('success'):
+                        batch_result['successful'] += 1
+                        results['successful_sends'] += 1
+                        print(f"✓ Sent to {email}")
+                    else:
+                        error_msg = f"Failed to send to {email}: {send_result.get('message', 'Unknown error')}"
+                        batch_result['errors'].append(error_msg)
+                        batch_result['failed'] += 1
+                        results['failed_sends'] += 1
+                        results['failed_recipients'].append(email)
+                        print(f"✗ Failed to send to {email}: {send_result.get('message')}")
+                        
+                except Exception as e:
+                    error_msg = f"Exception sending to {email}: {str(e)}"
+                    batch_result['errors'].append(error_msg)
+                    batch_result['failed'] += 1
+                    results['failed_sends'] += 1
+                    results['failed_recipients'].append(email if 'email' in locals() else 'unknown')
+                    print(f"✗ Exception sending to {email}: {str(e)}")
+            
+            # Add batch result to overall results
+            results['batch_results'].append(batch_result)
+            
+            print(f"Batch {batch_index} complete: {batch_result['successful']} successful, {batch_result['failed']} failed")
+            
+            # Apply cooldown between batches (except for the last batch)
+            if batch_index < results['total_batches']:
+                print(f"Applying {cooldown_seconds}s cooldown...")
+                time.sleep(cooldown_seconds)
+        
+        # Calculate success rate
+        success_rate = (results['successful_sends'] / results['total_recipients'] * 100) if results['total_recipients'] > 0 else 0
+        
+        print(f"Batch sending complete: {results['successful_sends']}/{results['total_recipients']} successful ({success_rate:.1f}%)")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Batch email sending completed: {results["successful_sends"]}/{results["total_recipients"]} emails sent successfully',
+            'results': results,
+            'success_rate': round(success_rate, 2)
+        })
+        
+    except Exception as e:
+        print(f"Error in send_direct_campaign_emails: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Server error: {str(e)}'
         }), 500
 
 # ============================================================================

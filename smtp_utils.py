@@ -1,15 +1,13 @@
 """
 SMTP Credentials management utilities
-Handles CRUD operations for SMTP email configurations with encrypted password storage
+Handles CRUD operations for SMTP email configurations with plain text password storage
 """
 
 import os
-import base64
 from typing import Optional, Dict, Any, List
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime
-from cryptography.fernet import Fernet
 
 # Load environment variables
 load_dotenv()
@@ -24,46 +22,6 @@ class SMTPManager:
             raise ValueError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in environment")
         
         self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
-        
-        # Initialize encryption key for passwords
-        encryption_key = os.getenv('PASSWORD_ENCRYPTION_KEY')
-        if not encryption_key:
-            # Generate a key if not exists (for development)
-            encryption_key = Fernet.generate_key().decode()
-            print(f"⚠️  Generated new encryption key: {encryption_key}")
-            print("⚠️  Add this to your .env file as PASSWORD_ENCRYPTION_KEY")
-        
-        self.cipher_suite = Fernet(encryption_key.encode() if isinstance(encryption_key, str) else encryption_key)
-    
-    def encrypt_password(self, password: str) -> str:
-        """
-        Encrypt SMTP password using Fernet (AES 128)
-        Returns base64 encoded encrypted password
-        """
-        try:
-            encrypted_password = self.cipher_suite.encrypt(password.encode())
-            return base64.b64encode(encrypted_password).decode()
-        except Exception as e:
-            print(f"Encryption error: {e}")
-            # Fallback to simple base64 for development
-            return base64.b64encode(password.encode()).decode()
-    
-    def decrypt_password(self, encrypted_password: str) -> str:
-        """
-        Decrypt SMTP password using Fernet
-        Returns original password string
-        """
-        try:
-            encrypted_bytes = base64.b64decode(encrypted_password.encode())
-            decrypted_password = self.cipher_suite.decrypt(encrypted_bytes)
-            return decrypted_password.decode()
-        except Exception as e:
-            print(f"Decryption error: {e}")
-            # Fallback to simple base64 decode for development
-            try:
-                return base64.b64decode(encrypted_password.encode()).decode()
-            except:
-                return "DECRYPTION_FAILED"
     
     def verify_account_exists(self, account_id: str) -> bool:
         """Verify that the account exists and is active"""
@@ -143,7 +101,7 @@ class SMTPManager:
                 'smtp_host': smtp_host.strip(),
                 'smtp_port': smtp_port,
                 'username': username.strip(),
-                'encrypted_password_ciphertext': self.encrypt_password(password),
+                'encrypted_password_ciphertext': password,  # Store password as plain text
                 'auth_type': auth_type,
                 'verified': False,
                 'last_verified_at': current_time,
@@ -154,7 +112,7 @@ class SMTPManager:
             result = self.supabase.table('smtp_credentials').insert(smtp_data).execute()
             
             if result.data:
-                # Remove encrypted password from response
+                # Remove password from response for security
                 response_data = result.data[0].copy()
                 response_data.pop('encrypted_password_ciphertext', None)
                 
@@ -193,20 +151,15 @@ class SMTPManager:
             if result.data:
                 smtp_data = result.data[0].copy()
                 
-                # If password is requested, decrypt it and add to response
+                # If password is requested, get plain text password and add to response
                 if include_password and 'encrypted_password_ciphertext' in smtp_data:
-                    encrypted_password = smtp_data.get('encrypted_password_ciphertext')
-                    if encrypted_password:
-                        try:
-                            decrypted_password = self.decrypt_password(encrypted_password)
-                            smtp_data['password'] = decrypted_password
-                        except Exception as decrypt_error:
-                            print(f"Password decryption failed: {decrypt_error}")
-                            smtp_data['password'] = "DECRYPTION_FAILED"
+                    plain_password = smtp_data.get('encrypted_password_ciphertext')
+                    if plain_password:
+                        smtp_data['password'] = plain_password
                     else:
                         smtp_data['password'] = "NO_PASSWORD_STORED"
                     
-                    # Remove the encrypted field from response
+                    # Remove the database field from response
                     smtp_data.pop('encrypted_password_ciphertext', None)
                 
                 return {
@@ -250,12 +203,7 @@ class SMTPManager:
             
             for key, value in updates.items():
                 if key in allowed_fields:
-                    if key == 'password':
-                        # Handle password update
-                        filtered_updates['encrypted_password_ciphertext'] = self.encrypt_password(value)
-                        filtered_updates['last_verified_at'] = datetime.now().isoformat()
-                        filtered_updates['verified'] = False  # Reset verification when password changes
-                    elif key == 'smtp_port':
+                    if key == 'smtp_port':
                         # Validate SMTP port
                         if not isinstance(value, int) or value < 1 or value > 65535:
                             return {
@@ -278,7 +226,7 @@ class SMTPManager:
             
             # Handle password update separately
             if 'password' in updates:
-                filtered_updates['encrypted_password_ciphertext'] = self.encrypt_password(updates['password'])
+                filtered_updates['encrypted_password_ciphertext'] = updates['password']  # Store password as plain text
                 filtered_updates['last_verified_at'] = datetime.now().isoformat()
                 filtered_updates['verified'] = False  # Reset verification when password changes
             
@@ -307,7 +255,7 @@ class SMTPManager:
             result = self.supabase.table('smtp_credentials').update(filtered_updates).eq('id', smtp_id).execute()
             
             if result.data:
-                # Remove encrypted password from response
+                # Remove password from response for security
                 response_data = result.data[0].copy()
                 response_data.pop('encrypted_password_ciphertext', None)
                 

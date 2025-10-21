@@ -188,8 +188,15 @@ class EmailSenderManager:
         Send email using SMTP configuration
         """
         try:
-            # Decrypt password
-            decrypted_password = self.decrypt_password(smtp_config['encrypted_password_ciphertext'])
+            # Get password from SMTP config (handle both old and new field names)
+            if 'password' in smtp_config:
+                # New format - password is already decrypted
+                decrypted_password = smtp_config['password']
+            elif 'encrypted_password_ciphertext' in smtp_config:
+                # Old format - need to decrypt
+                decrypted_password = self.decrypt_password(smtp_config['encrypted_password_ciphertext'])
+            else:
+                raise ValueError("No password field found in SMTP configuration")
             
             # Create message
             msg = MIMEMultipart("alternative")
