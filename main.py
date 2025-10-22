@@ -5,7 +5,7 @@ Provides endpoints for user authentication, registration, and account management
 
 import os
 import time
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 from db_utils import DatabaseManager
 from company_utils import CompanyManager
